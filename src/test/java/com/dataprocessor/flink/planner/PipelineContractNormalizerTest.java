@@ -1,0 +1,59 @@
+package com.dataprocessor.flink.planner;
+
+import java.util.List;
+import java.util.Map;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+class PipelineContractNormalizerTest {
+
+    private final PipelineContractNormalizer normalizer = new PipelineContractNormalizer(new ObjectMapper());
+
+    @Test
+    void normalizesLegacyAliases() {
+        String payload = """
+            [
+              {
+                "type": "filter",
+                "params": {
+                  "by": ["Client Account", "Buy/Sell"],
+                  "condition": "`Client Account` > 7000000000"
+                }
+              },
+              {
+                "type": "tag",
+                "params": {
+                  "col_name": "RiskTag",
+                  "conditions": ["`Client Account` > 8000000000"],
+                  "tags": ["high"]
+                }
+              }
+            ]
+            """;
+
+        List<Map<String, Object>> normalized = normalizer.normalizeJson(payload);
+
+        Assertions.assertEquals(
+            List.of("Client Account", "Buy/Sell"),
+            ((Map<?, ?>) normalized.get(0).get("params")).get("requiredCols")
+        );
+        Assertions.assertEquals(
+            "RiskTag",
+            ((Map<?, ?>) normalized.get(1).get("params")).get("tag_col_name")
+        );
+    }
+
+    @Test
+    void rejectsUnsupportedOperator() {
+        IllegalArgumentException exception = Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> normalizer.normalizeJson("""
+                [{"type": "value_mapping", "params": {}}]
+                """)
+        );
+
+        Assertions.assertTrue(exception.getMessage().contains("Unsupported operator"));
+    }
+}
