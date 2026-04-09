@@ -1,26 +1,63 @@
-// 对齐原 Maven 的插件与项目坐标，保持 Spring Boot 版本不变。
-plugins {
-    id 'java'
-    id 'org.springframework.boot' version '3.2.5'
+// 先走内网 Maven 仓解析 Spring Boot 插件，避免依赖 Gradle Plugin Portal。
+buildscript {
+    repositories {
+        maven {
+            url 'http://area.services.xx.com/area/repo/public'
+            allowInsecureProtocol = true
+        }
+        maven {
+            url 'http://prod-5.area.site.xx.com'
+            allowInsecureProtocol = true
+        }
+        maven {
+            url 'http://gxxscentral.services.xx.com'
+            allowInsecureProtocol = true
+        }
+        maven {
+            url 'http://gxxscentral.area.services.xx.com/maven'
+            allowInsecureProtocol = true
+        }
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'org.springframework.boot:spring-boot-gradle-plugin:3.2.5'
+    }
 }
+
+// 对齐公司已有 Gradle 项目的 apply plugin 写法，减少插件解析链路差异。
+apply plugin: 'java'
+apply plugin: 'org.springframework.boot'
 
 group = 'com.dataprocessor'
 version = '0.0.1-SNAPSHOT'
 description = 'Hybrid Java/Flink backend for pipeline parity with the Python reference engine'
 
-// 明确编译目标为 Java 17，和原 pom.xml 的 release 配置保持一致。
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(17)
-    }
-}
+// 保持 Java 17 编译目标，但不再强制要求额外安装一个独立的 17 toolchain。
+sourceCompatibility = JavaVersion.VERSION_17
+targetCompatibility = JavaVersion.VERSION_17
 
 ext {
     flinkVersion = '1.18.1'
 }
 
-// 继续使用 Maven Central 解析依赖，避免迁移构建系统时引入额外仓库差异。
+// 优先走内网仓库，再回退到 Maven Central，兼顾内网与开源依赖镜像场景。
 repositories {
+    maven {
+        url 'http://area.services.gxxs.com/area/repo/public'
+        allowInsecureProtocol = true
+    }
+    maven {
+        url 'http://prod-5.area.site.gxxs.com'
+        allowInsecureProtocol = true
+    }
+    maven {
+        url 'http://gxxscentral.services.gxxs.com'
+        allowInsecureProtocol = true
+    }
+    maven {
+        url 'http://gxxscentral.area.services.gxxs.com/maven'
+        allowInsecureProtocol = true
+    }
     mavenCentral()
 }
 
@@ -40,7 +77,8 @@ tasks.named('test') {
     useJUnitPlatform()
 }
 
-// 固定 Wrapper 版本，后续执行 wrapper 任务时继续生成同一套发行版。
-tasks.named('wrapper') {
-    gradleVersion = '8.7'
+// 直接用当前 Gradle JVM 输出 Java 17 兼容字节码，避免 IntelliJ 导入时再触发 toolchain 查找。
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+    options.encoding = 'UTF-8'
 }
