@@ -18,11 +18,17 @@
 ## Build
 
 ```bash
-mvn spring-boot:run
+./gradlew build
+```
+
+Run locally with:
+
+```bash
+./gradlew bootRun
 ```
 
 ## Notes
 
-- The Maven project targets Java 17.
-- The local Codex environment used for this change only has Java 8 installed, so the project structure and tests were added but not compiled locally here.
+- The Gradle wrapper targets Java 17.
+- The local Codex environment used for this change does not have Java installed, so the Gradle migration was completed statically and not executed locally here.
 - Detailed implementation notes, current gaps, and operator-level parity caveats are documented in `优化说明.md`.

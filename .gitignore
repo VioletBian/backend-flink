@@ -1,0 +1,5 @@
+# 构建输出不再入库，统一忽略 Maven 与 Gradle 产物。
+.gradle/
+build/
+out/
+target/

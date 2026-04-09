@@ -1,0 +1,2 @@
+// 保持根项目名称与原 Maven artifactId 一致。
+rootProject.name = 'backend-flink'

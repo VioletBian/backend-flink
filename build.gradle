@@ -1,0 +1,46 @@
+// 对齐原 Maven 的插件与项目坐标，保持 Spring Boot 版本不变。
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.2.5'
+}
+
+group = 'com.dataprocessor'
+version = '0.0.1-SNAPSHOT'
+description = 'Hybrid Java/Flink backend for pipeline parity with the Python reference engine'
+
+// 明确编译目标为 Java 17，和原 pom.xml 的 release 配置保持一致。
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+ext {
+    flinkVersion = '1.18.1'
+}
+
+// 继续使用 Maven Central 解析依赖，避免迁移构建系统时引入额外仓库差异。
+repositories {
+    mavenCentral()
+}
+
+// 按原 pom.xml 逐项迁移运行时与测试依赖，避免行为漂移。
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-data-mongodb'
+    implementation "org.apache.flink:flink-clients:${flinkVersion}"
+    implementation "org.apache.flink:flink-table-api-java-bridge:${flinkVersion}"
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+
+// Spring Boot 测试基于 JUnit Platform，需要显式打开。
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+// 固定 Wrapper 版本，后续执行 wrapper 任务时继续生成同一套发行版。
+tasks.named('wrapper') {
+    gradleVersion = '8.7'
+}
