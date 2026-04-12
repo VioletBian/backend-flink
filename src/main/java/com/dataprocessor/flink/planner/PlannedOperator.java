@@ -1,74 +1,69 @@
 package com.dataprocessor.flink.planner;
 
+import java.util.ArrayList;
 import java.util.List;
 
+// 中文说明：PlannedOperator 保留 spec 级诊断信息，方便 debug 时解释某个算子为什么 native 或 fallback。
 public class PlannedOperator {
 
-    private final int operatorIndex;
+    private final int specIndex;
+    private final int sourceStepIndex;
     private final String operatorType;
-    private final String executionMode;
-    private final List<String> readColumns;
-    private final List<String> writeColumns;
-    private final boolean rowSplitEligible;
-    private final boolean columnSplitEligible;
-    private final boolean barrier;
-    private final String barrierReason;
+    private final String requestedStrategy;
+    private final String resolvedStrategy;
+    private final boolean nativeCapable;
+    private final String fallbackReason;
+    private final List<String> supportedStrategies;
 
     public PlannedOperator(
-        int operatorIndex,
+        int specIndex,
+        int sourceStepIndex,
         String operatorType,
-        String executionMode,
-        List<String> readColumns,
-        List<String> writeColumns,
-        boolean rowSplitEligible,
-        boolean columnSplitEligible,
-        boolean barrier,
-        String barrierReason
+        String requestedStrategy,
+        String resolvedStrategy,
+        boolean nativeCapable,
+        String fallbackReason,
+        List<String> supportedStrategies
     ) {
-        this.operatorIndex = operatorIndex;
+        this.specIndex = specIndex;
+        this.sourceStepIndex = sourceStepIndex;
         this.operatorType = operatorType;
-        this.executionMode = executionMode;
-        this.readColumns = readColumns;
-        this.writeColumns = writeColumns;
-        this.rowSplitEligible = rowSplitEligible;
-        this.columnSplitEligible = columnSplitEligible;
-        this.barrier = barrier;
-        this.barrierReason = barrierReason;
+        this.requestedStrategy = requestedStrategy;
+        this.resolvedStrategy = resolvedStrategy;
+        this.nativeCapable = nativeCapable;
+        this.fallbackReason = fallbackReason;
+        this.supportedStrategies = new ArrayList<>(supportedStrategies);
     }
 
-    public int getOperatorIndex() {
-        return operatorIndex;
+    public int getSpecIndex() {
+        return specIndex;
+    }
+
+    public int getSourceStepIndex() {
+        return sourceStepIndex;
     }
 
     public String getOperatorType() {
         return operatorType;
     }
 
-    public String getExecutionMode() {
-        return executionMode;
+    public String getRequestedStrategy() {
+        return requestedStrategy;
     }
 
-    public List<String> getReadColumns() {
-        return readColumns;
+    public String getResolvedStrategy() {
+        return resolvedStrategy;
     }
 
-    public List<String> getWriteColumns() {
-        return writeColumns;
+    public boolean isNativeCapable() {
+        return nativeCapable;
     }
 
-    public boolean isRowSplitEligible() {
-        return rowSplitEligible;
+    public String getFallbackReason() {
+        return fallbackReason;
     }
 
-    public boolean isColumnSplitEligible() {
-        return columnSplitEligible;
-    }
-
-    public boolean isBarrier() {
-        return barrier;
-    }
-
-    public String getBarrierReason() {
-        return barrierReason;
+    public List<String> getSupportedStrategies() {
+        return new ArrayList<>(supportedStrategies);
     }
 }

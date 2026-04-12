@@ -55,8 +55,9 @@ public class PipelineController {
     public Map<String, Object> runPipeline(
         @RequestPart("file") MultipartFile file,
         @RequestPart("pipeline_json") String pipelineJson,
+        @RequestParam(name = "enableParallel", defaultValue = "false") boolean enableParallel,
         @RequestParam(name = "debug", defaultValue = "false") boolean debug
     ) {
-        return hybridPipelineService.runPipeline(file, pipelineJson, debug);
+        return hybridPipelineService.runPipeline(file, pipelineJson, enableParallel, debug);
     }
 }

@@ -1,14 +1,10 @@
 package com.dataprocessor.flink.service;
 
 import java.nio.charset.StandardCharsets;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import com.dataprocessor.flink.planner.OperatorCapabilityRegistry;
 import com.dataprocessor.flink.planner.PipelineContractNormalizer;
-import com.dataprocessor.flink.planner.StagePlanner;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -18,39 +14,35 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.mock.web.MockMultipartFile;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class HybridPipelineServiceTest {
 
     @Mock
-    private PythonFallbackBridge pythonFallbackBridge;
-
-    @Mock
-    private BatchTableEnvironmentFactory batchTableEnvironmentFactory;
+    private PipelineRunService pipelineRunService;
 
     private HybridPipelineService hybridPipelineService;
 
     @BeforeEach
     void setUp() {
         hybridPipelineService = new HybridPipelineService(
-            new PipelineContractNormalizer(new ObjectMapper()),
-            new StagePlanner(new OperatorCapabilityRegistry()),
-            pythonFallbackBridge,
-            new ObjectMapper(),
-            batchTableEnvironmentFactory
+            new PipelineContractNormalizer(new com.fasterxml.jackson.databind.ObjectMapper()),
+            pipelineRunService
         );
     }
 
     @Test
-    void appendsEngineDebugInDebugMode() {
-        Map<String, Object> fallbackResponse = new LinkedHashMap<>();
-        fallbackResponse.put("columns", List.of("Client Account"));
-        fallbackResponse.put("rows", List.of());
-
-        when(pythonFallbackBridge.run(any(), anyString(), eq(true))).thenReturn(fallbackResponse);
+    void delegatesRunRequestWithEnableParallelFlag() {
+        when(pipelineRunService.runPipeline(any(), anyString(), anyBoolean(), anyBoolean())).thenReturn(
+            Map.of(
+                "columns", List.of("Client Account"),
+                "rows", List.of(),
+                "csv", "Client Account\n"
+            )
+        );
 
         MockMultipartFile input = new MockMultipartFile(
             "file",
@@ -62,11 +54,12 @@ class HybridPipelineServiceTest {
         Map<String, Object> response = hybridPipelineService.runPipeline(
             input,
             """
-                [{"type":"filter","params":{"requiredCols":["Client Account"],"condition":"`Client Account` > 0"}}]
+                [{"type":"formatter","params":{"method":"ToUpperCase","columns":["Client Account"],"value_expr":""}}]
                 """,
-            true
+            true,
+            false
         );
 
-        Assertions.assertTrue(response.containsKey("engine_debug"));
+        Assertions.assertEquals(List.of("Client Account"), response.get("columns"));
     }
 }
