@@ -1,7 +1,6 @@
 package com.dataprocessor.flink.runtime;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -17,10 +16,8 @@ public class RuntimeTable {
 
     public RuntimeTable(List<String> columns, List<RuntimeRow> rows) {
         this.columns = new ArrayList<>(columns);
-        this.rows = rows.stream()
-            .map(RuntimeRow::copy)
-            .sorted(Comparator.comparingLong(RuntimeRow::getRowId))
-            .toList();
+        // 中文说明：这里保留调用方给出的当前行顺序；_row_id 只承担稳定索引身份，不能反过来把 sort 后顺序洗掉。
+        this.rows = rows.stream().map(RuntimeRow::copy).toList();
     }
 
     public List<String> getColumns() {

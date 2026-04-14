@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import com.dataprocessor.flink.runtime.RowExpressionEvaluator;
 import com.dataprocessor.flink.runtime.RuntimeTable;
 import org.springframework.stereotype.Component;
 
@@ -25,13 +26,33 @@ public class StagePlanner {
         ExecutionConfig.ROWS,
         ExecutionConfig.COLUMNS
     );
-    private static final Set<String> ROW_NATIVE_TYPES = Set.of("rename", "formatter", "date_formatter");
+    private static final Set<String> ROW_NATIVE_TYPES = Set.of(
+        "filter",
+        "rename",
+        "tag",
+        "col_assign",
+        "formatter",
+        "date_formatter"
+    );
     private static final Set<String> COLUMN_NATIVE_TYPES = Set.of("formatter", "date_formatter");
+    private static final Set<String> SERIAL_NATIVE_TYPES = Set.of(
+        "filter",
+        "rename",
+        "aggregate",
+        "sort",
+        "tag",
+        "col_assign",
+        "formatter",
+        "date_formatter"
+    );
+    private static final Set<String> NATIVE_AGGREGATE_METHODS = Set.of("mean", "count", "sum", "max", "min", "std");
 
     private final OperatorCapabilityRegistry capabilityRegistry;
+    private final RowExpressionEvaluator rowExpressionEvaluator;
 
-    public StagePlanner(OperatorCapabilityRegistry capabilityRegistry) {
+    public StagePlanner(OperatorCapabilityRegistry capabilityRegistry, RowExpressionEvaluator rowExpressionEvaluator) {
         this.capabilityRegistry = capabilityRegistry;
+        this.rowExpressionEvaluator = rowExpressionEvaluator;
     }
 
     // 中文说明：prepared pipeline 是运行态 enrich 结果，execution 在这里补齐，但不会回写到持久化 DSL。
@@ -212,7 +233,7 @@ public class StagePlanner {
         List<OperationSpec> candidateSpecs = candidateSegment.getSpecs();
         String strategy = resolveStageStrategy(runtimeTable, candidateSegment);
         int maxWorkers = ExecutionConfig.SERIAL.equals(strategy) ? 1 : resolveMaxWorkers(candidateSpecs);
-        boolean nativeCapable = isNativeCapable(candidateSpecs, strategy);
+        boolean nativeCapable = isNativeCapable(runtimeTable, candidateSpecs, strategy);
 
         return new StagePlan(
             stageIndex,
@@ -321,24 +342,49 @@ public class StagePlanner {
         return ExecutionConfig.SERIAL;
     }
 
-    private boolean isNativeCapable(List<OperationSpec> specs, String resolvedStrategy) {
-        Set<String> allowedTypes = ExecutionConfig.COLUMNS.equals(resolvedStrategy) ? COLUMN_NATIVE_TYPES : ROW_NATIVE_TYPES;
+    private boolean isNativeCapable(RuntimeTable runtimeTable, List<OperationSpec> specs, String resolvedStrategy) {
+        Set<String> allowedTypes = resolveNativeTypesForStrategy(resolvedStrategy);
+        List<String> currentColumns = new ArrayList<>(runtimeTable.getColumns());
         for (OperationSpec spec : specs) {
             if (!allowedTypes.contains(spec.getType())) {
                 return false;
             }
+            if (!isSpecNativeCapable(spec, resolvedStrategy, currentColumns)) {
+                return false;
+            }
+            currentColumns = previewColumnsAfterSpec(currentColumns, spec);
         }
         return true;
     }
 
     private String resolveFallbackReason(List<OperationSpec> specs, String resolvedStrategy) {
-        if (specs.stream().anyMatch(spec -> Set.of("aggregate", "sort", "col_apply").contains(spec.getType()))) {
-            return "barrier-operator";
-        }
         if (ExecutionConfig.COLUMNS.equals(resolvedStrategy)) {
             return "operator-not-column-native";
         }
-        return "operator-requires-python-fallback";
+        for (OperationSpec spec : specs) {
+            if ("col_apply".equals(spec.getType())) {
+                return "operator-requires-python-fallback";
+            }
+            if ("series_transform".equals(spec.getType())) {
+                return "series-transform-requires-python-fallback";
+            }
+            if ("col_assign".equals(spec.getType()) && !"vectorized".equals(spec.getParams().get("method"))) {
+                return "col-assign-method-requires-python-fallback";
+            }
+            if ("aggregate".equals(spec.getType()) && !supportsNativeAggregate(spec)) {
+                return "aggregate-method-requires-python-fallback";
+            }
+            if ("filter".equals(spec.getType())) {
+                return "filter-condition-requires-python-fallback";
+            }
+            if ("tag".equals(spec.getType())) {
+                return "tag-condition-requires-python-fallback";
+            }
+            if ("col_assign".equals(spec.getType()) && "vectorized".equals(spec.getParams().get("method"))) {
+                return "col-assign-expression-requires-python-fallback";
+            }
+        }
+        return "operator-not-native";
     }
 
     private int resolveColumnComponentCount(List<OperationSpec> specs) {
@@ -357,14 +403,107 @@ public class StagePlanner {
         if ("formatter".equals(spec.getType()) || "date_formatter".equals(spec.getType())) {
             return asStringList(spec.getParams().get("columns"));
         }
-        if ("series_transform".equals(spec.getType())) {
-            Object rawRename = spec.getParams().get("rename");
-            if (rawRename instanceof List<?> rename) {
-                return rename.stream().map(String::valueOf).toList();
-            }
-            return asStringList(spec.getParams().get("on"));
-        }
         return List.of();
+    }
+
+    private Set<String> resolveNativeTypesForStrategy(String strategy) {
+        if (ExecutionConfig.COLUMNS.equals(strategy)) {
+            return COLUMN_NATIVE_TYPES;
+        }
+        if (ExecutionConfig.ROWS.equals(strategy)) {
+            return ROW_NATIVE_TYPES;
+        }
+        return SERIAL_NATIVE_TYPES;
+    }
+
+    private boolean isSpecNativeCapable(OperationSpec spec, String resolvedStrategy, List<String> availableColumns) {
+        if ("filter".equals(spec.getType())) {
+            return rowExpressionEvaluator.supportsBooleanExpression(spec.getCondition(), availableColumns);
+        }
+        if ("tag".equals(spec.getType())) {
+            List<String> conditions = asStringList(spec.getParams().get("conditions"));
+            List<String> tags = asStringList(spec.getParams().get("tags"));
+            if (conditions.size() != tags.size()) {
+                return false;
+            }
+            return conditions.stream()
+                .allMatch(condition -> rowExpressionEvaluator.supportsBooleanExpression(condition, availableColumns));
+        }
+        if ("col_assign".equals(spec.getType())) {
+            if (!"vectorized".equals(spec.getParams().get("method"))) {
+                return false;
+            }
+            return rowExpressionEvaluator.supportsBooleanExpression(spec.getCondition(), availableColumns)
+                && rowExpressionEvaluator.supportsValueExpression(
+                    String.valueOf(spec.getParams().get("value_expr")),
+                    availableColumns
+                );
+        }
+        if ("aggregate".equals(spec.getType())) {
+            return ExecutionConfig.SERIAL.equals(resolvedStrategy) && supportsNativeAggregate(spec);
+        }
+        if ("sort".equals(spec.getType())) {
+            return ExecutionConfig.SERIAL.equals(resolvedStrategy) && !asStringList(spec.getParams().get("by")).isEmpty();
+        }
+        return true;
+    }
+
+    private boolean supportsNativeAggregate(OperationSpec spec) {
+        Object rawActions = spec.getParams().get("actions");
+        if (!(rawActions instanceof Map<?, ?> actions)) {
+            return false;
+        }
+        String method = String.valueOf(actions.get("method"));
+        if (!NATIVE_AGGREGATE_METHODS.contains(method)) {
+            return false;
+        }
+        List<String> onColumns = asStringList(actions.get("on"));
+        if (onColumns.isEmpty() || asStringList(spec.getParams().get("by")).isEmpty()) {
+            return false;
+        }
+        List<String> renameColumns = asStringList(actions.get("rename"));
+        return renameColumns.isEmpty() || renameColumns.size() == onColumns.size();
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> previewColumnsAfterSpec(List<String> currentColumns, OperationSpec spec) {
+        if ("filter".equals(spec.getType())) {
+            List<String> projectedColumns = asStringList(spec.getParams().get("requiredCols"));
+            if (projectedColumns.isEmpty()) {
+                return new ArrayList<>(currentColumns);
+            }
+            return currentColumns.stream().filter(projectedColumns::contains).toList();
+        }
+        if ("rename".equals(spec.getType())) {
+            Map<String, String> renameMap = asStringMap(spec.getParams().get("map"));
+            return currentColumns.stream().map(column -> renameMap.getOrDefault(column, column)).toList();
+        }
+        if ("aggregate".equals(spec.getType())) {
+            Map<String, Object> actions = spec.getParams().get("actions") instanceof Map<?, ?> rawActions
+                ? new LinkedHashMap<>((Map<String, Object>) rawActions)
+                : new LinkedHashMap<>();
+            List<String> onColumns = asStringList(actions.get("on"));
+            List<String> renameColumns = asStringList(actions.get("rename"));
+            List<String> outputColumns = renameColumns.isEmpty() ? onColumns : renameColumns;
+            List<String> nextColumns = new ArrayList<>(asStringList(spec.getParams().get("by")));
+            nextColumns.addAll(outputColumns);
+            return nextColumns;
+        }
+        if ("tag".equals(spec.getType())) {
+            return appendColumn(currentColumns, String.valueOf(spec.getParams().get("tag_col_name")));
+        }
+        if ("col_assign".equals(spec.getType())) {
+            return appendColumn(currentColumns, String.valueOf(spec.getParams().get("col_name")));
+        }
+        return new ArrayList<>(currentColumns);
+    }
+
+    private List<String> appendColumn(List<String> currentColumns, String columnName) {
+        List<String> nextColumns = new ArrayList<>(currentColumns);
+        if (!nextColumns.contains(columnName)) {
+            nextColumns.add(columnName);
+        }
+        return nextColumns;
     }
 
     private int resolveMaxWorkers(List<OperationSpec> specs) {

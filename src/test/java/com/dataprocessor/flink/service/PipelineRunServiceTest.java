@@ -8,6 +8,7 @@ import com.dataprocessor.flink.planner.OperatorCapabilityRegistry;
 import com.dataprocessor.flink.planner.PipelineContractNormalizer;
 import com.dataprocessor.flink.planner.StagePlanner;
 import com.dataprocessor.flink.runtime.CsvRuntimeTableCodec;
+import com.dataprocessor.flink.runtime.RowExpressionEvaluator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -17,6 +18,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PipelineRunServiceTest {
@@ -30,8 +33,8 @@ class PipelineRunServiceTest {
 
         PipelineRunService pipelineRunService = new PipelineRunService(
             new PipelineContractNormalizer(new ObjectMapper()),
-            new StagePlanner(new OperatorCapabilityRegistry()),
-            new NativeStageExecutor(Mockito.mock(BatchTableEnvironmentFactory.class)),
+            new StagePlanner(new OperatorCapabilityRegistry(), new RowExpressionEvaluator()),
+            new NativeStageExecutor(Mockito.mock(BatchTableEnvironmentFactory.class), new RowExpressionEvaluator()),
             pythonFallbackBridge,
             new CsvRuntimeTableCodec(),
             new ObjectMapper()
@@ -60,5 +63,41 @@ class PipelineRunServiceTest {
         Assertions.assertTrue(response.containsKey("execution_plan"));
         Assertions.assertTrue(response.containsKey("step_snapshots"));
         Assertions.assertFalse(response.containsKey("engine_debug"));
+    }
+
+    @Test
+    void nativePipelineDoesNotInvokePythonFallbackWhenDebugIsDisabled() {
+        PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
+
+        PipelineRunService pipelineRunService = new PipelineRunService(
+            new PipelineContractNormalizer(new ObjectMapper()),
+            new StagePlanner(new OperatorCapabilityRegistry(), new RowExpressionEvaluator()),
+            new NativeStageExecutor(Mockito.mock(BatchTableEnvironmentFactory.class), new RowExpressionEvaluator()),
+            pythonFallbackBridge,
+            new CsvRuntimeTableCodec(),
+            new ObjectMapper()
+        );
+
+        Map<String, Object> response = pipelineRunService.runPipeline(
+            "Client Account,Price\n7001,12\n7002,9\n".getBytes(StandardCharsets.UTF_8),
+            """
+                [
+                  {
+                    "type": "tag",
+                    "params": {
+                      "conditions": ["`Price` >= 10"],
+                      "tag_col_name": "Alert",
+                      "tags": ["HIGH"],
+                      "default_tag": "LOW"
+                    }
+                  }
+                ]
+                """,
+            false,
+            false
+        );
+
+        Assertions.assertEquals(List.of("Client Account", "Price", "Alert"), response.get("columns"));
+        verify(pythonFallbackBridge, never()).run(any(), anyString(), anyBoolean());
     }
 }

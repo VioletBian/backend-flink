@@ -1,34 +1,47 @@
 # backend-flink
 
-`backend-flink` is the Java-side parity backend for the shared JSON operator pipeline.
+`backend-flink` 是当前 pipeline `/run` 的 Java/Flink 备用执行后端。
 
-## Current scope
+## 当前范围
 
-- Exposes the same REST routes as the Python backend: `/dp/pipeline/save`, `/dp/pipeline/get`, `/dp/pipeline/versions`, `/dp/pipeline/run`.
-- Normalizes legacy JSON field aliases into the canonical DSL before saving or running.
-- Builds a stage plan with row-split / column-split eligibility and native-vs-fallback markers.
-- Uses a local Python reference runner as the execution bridge today so result semantics stay aligned while the Flink-native path is expanded.
+- 对外重点对齐 `/dp/pipeline/run`
+- `/run` 接口参数与 Python backend 一致：
+  - `file`
+  - `pipeline_json`
+  - `enableParallel`
+  - 可选 query `debug=true`
+- 运行时会在 Java 侧临时 enrich step 顶层 `execution`，执行结束即丢弃，不污染保存态 pipeline JSON
+- 当前已实现 Java runner / planner / segment execute 链路
+- 当前原生执行已经覆盖一批“可静态证明安全”的 native 子集：
+  - `filter`（简单条件表达式）
+  - `rename`
+  - `tag`（简单条件表达式，first-match）
+  - `col_assign`（仅 `method=vectorized` 且表达式可静态解析）
+  - `sort`
+  - `aggregate`（`mean/count/sum/max/min/std`）
+  - `formatter`
+  - `date_formatter`
+- 其他算子或不安全 stage 会自动回退到 Python reference runner
+  - `col_apply`
+  - `col_assign.lambda`
+  - 复杂 `filter` / `tag` / `col_assign.vectorized` 表达式
+  - `series_transform`（当前仍走 Python）
 
-## Runtime defaults
+## 运行默认值
 
-- Port: `8004`
-- Mongo collection: `pipelines`
-- Python bridge command: `python3 ../backend/scripts/reference_runner_cli.py`
+- 端口：`8004`
+- Python bridge command：`python3 backend/scripts/reference_runner_cli.py`
+- 开发态 CORS 默认放开 `localhost/127.0.0.1` 的各端口，可在 `backend.flink.cors.allowed-origin-patterns` 调整
 
-## Build
+## 构建
 
 ```bash
-./gradlew build
-```
-
-Run locally with:
-
-```bash
+./gradlew test
 ./gradlew bootRun
 ```
 
-## Notes
+## 说明
 
-- The Gradle wrapper targets Java 17.
-- The local Codex environment used for this change does not have Java installed, so the Gradle migration was completed statically and not executed locally here.
-- Detailed implementation notes, current gaps, and operator-level parity caveats are documented in `优化说明.md`.
+- 当前以 Gradle wrapper 作为标准构建入口，已对齐到 `/Users/fortunebian/Downloads/repos/backend-flink` 的 wrapper 体系。
+- 工程目标 Java 版本为 `17`。
+- 更完整的实现细节、并行规划逻辑、当前原生支持边界和 fallback 算子说明见 [优化说明.md](/Users/fortunebian/Desktop/data-processor/backend-flink/优化说明.md)。

@@ -15,6 +15,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -23,6 +24,7 @@ import java.util.concurrent.Executors;
 import com.dataprocessor.flink.planner.ExecutionConfig;
 import com.dataprocessor.flink.planner.OperationSpec;
 import com.dataprocessor.flink.planner.StagePlan;
+import com.dataprocessor.flink.runtime.RowExpressionEvaluator;
 import com.dataprocessor.flink.runtime.RuntimeRow;
 import com.dataprocessor.flink.runtime.RuntimeTable;
 import org.apache.flink.api.common.RuntimeExecutionMode;
@@ -30,7 +32,8 @@ import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.springframework.stereotype.Component;
 
-// 中文说明：这里只实现当前最容易守住语义的 Java native 段，其余 stage 统一回退 Python，避免把备用后端做成“半对齐”。
+// 中文说明：这里把“已经能静态证明语义安全”的算子尽量收进 Java native；
+// 仍依赖 Python callable / eval 语义的部分继续回退 Python bridge。
 @Component
 public class NativeStageExecutor {
 
@@ -44,11 +47,16 @@ public class NativeStageExecutor {
         "dd/MM/yyyy", "dd/MM/yyyy",
         "MM/dd/yyyy", "MM/dd/yyyy"
     );
-
+    private static final Set<String> COLUMN_NATIVE_TYPES = Set.of("formatter", "date_formatter");
     private final BatchTableEnvironmentFactory batchTableEnvironmentFactory;
+    private final RowExpressionEvaluator rowExpressionEvaluator;
 
-    public NativeStageExecutor(BatchTableEnvironmentFactory batchTableEnvironmentFactory) {
+    public NativeStageExecutor(
+        BatchTableEnvironmentFactory batchTableEnvironmentFactory,
+        RowExpressionEvaluator rowExpressionEvaluator
+    ) {
         this.batchTableEnvironmentFactory = batchTableEnvironmentFactory;
+        this.rowExpressionEvaluator = rowExpressionEvaluator;
     }
 
     public boolean supports(StagePlan stagePlan) {
@@ -65,7 +73,7 @@ public class NativeStageExecutor {
         return executeSerialStage(inputTable, stagePlan.getSpecs());
     }
 
-    // 中文说明：行式 stage 真正交给 Flink batch DataStream 执行，确保这部分不是“假并行”。
+    // 中文说明：行式 stage 只放 row-local 算子，真正交给 Flink batch DataStream 并行跑。
     private RuntimeTable executeRowStage(RuntimeTable inputTable, StagePlan stagePlan) {
         if (stagePlan.getMaxWorkers() <= 1 || inputTable.getRowCount() < 2) {
             return executeSerialStage(inputTable, stagePlan.getSpecs());
@@ -77,11 +85,52 @@ public class NativeStageExecutor {
 
         DataStream<RuntimeRow> stream = env.fromCollection(inputTable.getRows()).setParallelism(stagePlan.getMaxWorkers());
         for (OperationSpec spec : stagePlan.getSpecs()) {
+            if ("filter".equals(spec.getType())) {
+                List<String> availableColumns = new ArrayList<>(currentColumns);
+                RowExpressionEvaluator.CompiledBooleanExpression compiledExpression =
+                    rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), availableColumns);
+                List<String> projectedColumns = projectedColumns(currentColumns, spec);
+                stream = stream.filter(row -> rowExpressionEvaluator.evaluateBoolean(row, compiledExpression))
+                    .setParallelism(stagePlan.getMaxWorkers());
+                if (!projectedColumns.isEmpty()) {
+                    stream = stream.map(row -> projectRow(row, projectedColumns)).setParallelism(stagePlan.getMaxWorkers());
+                    currentColumns = projectedColumns;
+                }
+                continue;
+            }
             if ("rename".equals(spec.getType())) {
                 List<String> beforeColumns = new ArrayList<>(currentColumns);
                 Map<String, String> renameMap = asStringMap(spec.getParams().get("map"));
                 stream = stream.map(row -> renameRow(row, beforeColumns, renameMap)).setParallelism(stagePlan.getMaxWorkers());
                 currentColumns = renameColumns(currentColumns, renameMap);
+                continue;
+            }
+            if ("tag".equals(spec.getType())) {
+                List<String> availableColumns = new ArrayList<>(currentColumns);
+                List<RowExpressionEvaluator.CompiledBooleanExpression> compiledConditions = compileConditions(
+                    asStringList(spec.getParams().get("conditions")),
+                    availableColumns
+                );
+                List<String> tags = asStringList(spec.getParams().get("tags"));
+                String tagColumn = String.valueOf(spec.getParams().get("tag_col_name"));
+                Object defaultTag = spec.getParams().get("default_tag");
+                stream = stream.map(
+                    row -> applyTag(row, tagColumn, compiledConditions, tags, defaultTag)
+                ).setParallelism(stagePlan.getMaxWorkers());
+                currentColumns = appendColumn(currentColumns, tagColumn);
+                continue;
+            }
+            if ("col_assign".equals(spec.getType())) {
+                List<String> availableColumns = new ArrayList<>(currentColumns);
+                RowExpressionEvaluator.CompiledBooleanExpression compiledCondition =
+                    rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), availableColumns);
+                RowExpressionEvaluator.CompiledValueExpression compiledValue =
+                    rowExpressionEvaluator.compileValueExpression(String.valueOf(spec.getParams().get("value_expr")), availableColumns);
+                String columnName = String.valueOf(spec.getParams().get("col_name"));
+                stream = stream.map(
+                    row -> applyVectorizedColAssign(row, columnName, compiledCondition, compiledValue)
+                ).setParallelism(stagePlan.getMaxWorkers());
+                currentColumns = appendColumn(currentColumns, columnName);
                 continue;
             }
             if ("formatter".equals(spec.getType())) {
@@ -107,7 +156,7 @@ public class NativeStageExecutor {
         return new RuntimeTable(currentColumns, resultRows);
     }
 
-    // 中文说明：列式 stage 只对当前已原生支持的逐列算子开放，按列分组并发跑后再按 _row_id 回拼。
+    // 中文说明：列式并发当前仍聚焦逐列无副作用算子，避免把互相依赖的列拆散后产生语义漂移。
     private RuntimeTable executeColumnStage(RuntimeTable inputTable, StagePlan stagePlan) {
         List<String> touchedColumns = resolveTouchedColumns(stagePlan.getSpecs(), inputTable.getColumns());
         if (stagePlan.getMaxWorkers() <= 1 || touchedColumns.size() <= 1) {
@@ -136,29 +185,176 @@ public class NativeStageExecutor {
     }
 
     private RuntimeTable executeSerialStage(RuntimeTable inputTable, List<OperationSpec> specs) {
-        List<String> currentColumns = new ArrayList<>(inputTable.getColumns());
-        List<RuntimeRow> currentRows = inputTable.getRows();
-
+        RuntimeTable currentTable = inputTable;
         for (OperationSpec spec : specs) {
-            if ("rename".equals(spec.getType())) {
-                Map<String, String> renameMap = asStringMap(spec.getParams().get("map"));
-                List<String> beforeColumns = new ArrayList<>(currentColumns);
-                currentRows = currentRows.stream().map(row -> renameRow(row, beforeColumns, renameMap)).toList();
-                currentColumns = renameColumns(currentColumns, renameMap);
-                continue;
-            }
-            if ("formatter".equals(spec.getType())) {
-                currentRows = currentRows.stream().map(row -> applyFormatter(row, spec)).toList();
-                continue;
-            }
-            if ("date_formatter".equals(spec.getType())) {
-                currentRows = currentRows.stream().map(row -> applyDateFormatter(row, spec)).toList();
-                continue;
-            }
-            throw new IllegalStateException("Unsupported native serial stage operator: " + spec.getType());
+            currentTable = executeSerialSpec(currentTable, spec);
+        }
+        return currentTable;
+    }
+
+    private RuntimeTable executeSerialSpec(RuntimeTable inputTable, OperationSpec spec) {
+        if ("filter".equals(spec.getType())) {
+            return applyFilter(inputTable, spec);
+        }
+        if ("rename".equals(spec.getType())) {
+            return applyRename(inputTable, spec);
+        }
+        if ("aggregate".equals(spec.getType())) {
+            return applyAggregate(inputTable, spec);
+        }
+        if ("sort".equals(spec.getType())) {
+            return applySort(inputTable, spec);
+        }
+        if ("tag".equals(spec.getType())) {
+            return applyTag(inputTable, spec);
+        }
+        if ("col_assign".equals(spec.getType())) {
+            return applyVectorizedColAssign(inputTable, spec);
+        }
+        if ("formatter".equals(spec.getType())) {
+            return applyFormatter(inputTable, spec);
+        }
+        if ("date_formatter".equals(spec.getType())) {
+            return applyDateFormatter(inputTable, spec);
+        }
+        throw new IllegalStateException("Unsupported native serial stage operator: " + spec.getType());
+    }
+
+    private RuntimeTable applyFilter(RuntimeTable inputTable, OperationSpec spec) {
+        List<String> availableColumns = inputTable.getColumns();
+        RowExpressionEvaluator.CompiledBooleanExpression compiledExpression =
+            rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), availableColumns);
+        List<RuntimeRow> filteredRows = inputTable.getRows().stream()
+            .filter(row -> rowExpressionEvaluator.evaluateBoolean(row, compiledExpression))
+            .toList();
+        List<String> projectedColumns = projectedColumns(inputTable.getColumns(), spec);
+        if (projectedColumns.isEmpty()) {
+            return new RuntimeTable(inputTable.getColumns(), filteredRows);
+        }
+        return new RuntimeTable(projectedColumns, filteredRows.stream().map(row -> projectRow(row, projectedColumns)).toList());
+    }
+
+    private RuntimeTable applyRename(RuntimeTable inputTable, OperationSpec spec) {
+        List<String> currentColumns = inputTable.getColumns();
+        Map<String, String> renameMap = asStringMap(spec.getParams().get("map"));
+        List<RuntimeRow> renamedRows = inputTable.getRows().stream()
+            .map(row -> renameRow(row, currentColumns, renameMap))
+            .toList();
+        return new RuntimeTable(renameColumns(currentColumns, renameMap), renamedRows);
+    }
+
+    private RuntimeTable applyTag(RuntimeTable inputTable, OperationSpec spec) {
+        List<String> currentColumns = inputTable.getColumns();
+        List<RowExpressionEvaluator.CompiledBooleanExpression> compiledConditions = compileConditions(
+            asStringList(spec.getParams().get("conditions")),
+            currentColumns
+        );
+        List<String> tags = asStringList(spec.getParams().get("tags"));
+        String tagColumn = String.valueOf(spec.getParams().get("tag_col_name"));
+        Object defaultTag = spec.getParams().get("default_tag");
+        List<RuntimeRow> taggedRows = inputTable.getRows().stream()
+            .map(row -> applyTag(row, tagColumn, compiledConditions, tags, defaultTag))
+            .toList();
+        return new RuntimeTable(appendColumn(currentColumns, tagColumn), taggedRows);
+    }
+
+    private RuntimeTable applyVectorizedColAssign(RuntimeTable inputTable, OperationSpec spec) {
+        List<String> currentColumns = inputTable.getColumns();
+        String columnName = String.valueOf(spec.getParams().get("col_name"));
+        RowExpressionEvaluator.CompiledBooleanExpression compiledCondition =
+            rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), currentColumns);
+        RowExpressionEvaluator.CompiledValueExpression compiledValue =
+            rowExpressionEvaluator.compileValueExpression(String.valueOf(spec.getParams().get("value_expr")), currentColumns);
+
+        List<RuntimeRow> resultRows = inputTable.getRows().stream()
+            .map(row -> applyVectorizedColAssign(row, columnName, compiledCondition, compiledValue))
+            .toList();
+        return new RuntimeTable(appendColumn(currentColumns, columnName), resultRows);
+    }
+
+    private RuntimeTable applySort(RuntimeTable inputTable, OperationSpec spec) {
+        List<String> sortColumns = asStringList(spec.getParams().get("by"));
+        List<Boolean> ascending = normalizeAscending(sortColumns, spec.getParams().get("ascending"));
+        List<RuntimeRow> currentRows = inputTable.getRows();
+        Map<Long, Integer> positionByRowId = new LinkedHashMap<>();
+        for (int index = 0; index < currentRows.size(); index++) {
+            positionByRowId.put(currentRows.get(index).getRowId(), index);
         }
 
-        return new RuntimeTable(currentColumns, currentRows);
+        List<RuntimeRow> sortedRows = new ArrayList<>(currentRows);
+        sortedRows.sort((left, right) -> {
+            Map<String, Object> leftValues = left.getValues();
+            Map<String, Object> rightValues = right.getValues();
+            for (int index = 0; index < sortColumns.size(); index++) {
+                int comparison = compareValues(
+                    leftValues.get(sortColumns.get(index)),
+                    rightValues.get(sortColumns.get(index)),
+                    ascending.get(index)
+                );
+                if (comparison != 0) {
+                    return comparison;
+                }
+            }
+            return Integer.compare(
+                positionByRowId.getOrDefault(left.getRowId(), Integer.MAX_VALUE),
+                positionByRowId.getOrDefault(right.getRowId(), Integer.MAX_VALUE)
+            );
+        });
+        return new RuntimeTable(inputTable.getColumns(), sortedRows);
+    }
+
+    @SuppressWarnings("unchecked")
+    private RuntimeTable applyAggregate(RuntimeTable inputTable, OperationSpec spec) {
+        List<String> byColumns = asStringList(spec.getParams().get("by"));
+        Map<String, Object> actions = spec.getParams().get("actions") instanceof Map<?, ?> rawActions
+            ? new LinkedHashMap<>((Map<String, Object>) rawActions)
+            : new LinkedHashMap<>();
+        String method = String.valueOf(actions.get("method"));
+        List<String> onColumns = asStringList(actions.get("on"));
+        List<String> renameColumns = asStringList(actions.get("rename"));
+        List<String> outputColumns = renameColumns.isEmpty() ? onColumns : renameColumns;
+
+        Map<GroupKey, List<RuntimeRow>> groups = new LinkedHashMap<>();
+        for (RuntimeRow row : inputTable.getRows()) {
+            List<Object> keyValues = byColumns.stream().map(column -> row.getValues().get(column)).toList();
+            if (keyValues.stream().anyMatch(Objects::isNull)) {
+                continue;
+            }
+            groups.computeIfAbsent(new GroupKey(keyValues), ignored -> new ArrayList<>()).add(row);
+        }
+
+        List<GroupKey> orderedKeys = new ArrayList<>(groups.keySet());
+        orderedKeys.sort((left, right) -> compareGroupKeys(left.values(), right.values()));
+
+        List<String> resultColumns = new ArrayList<>(byColumns);
+        resultColumns.addAll(outputColumns);
+        List<RuntimeRow> resultRows = new ArrayList<>();
+        long nextRowId = 0L;
+        for (GroupKey key : orderedKeys) {
+            LinkedHashMap<String, Object> aggregated = new LinkedHashMap<>();
+            for (int index = 0; index < byColumns.size(); index++) {
+                aggregated.put(byColumns.get(index), key.values().get(index));
+            }
+
+            List<RuntimeRow> groupRows = groups.get(key);
+            for (int index = 0; index < onColumns.size(); index++) {
+                String sourceColumn = onColumns.get(index);
+                String targetColumn = outputColumns.get(index);
+                aggregated.put(targetColumn, aggregateValues(groupRows, sourceColumn, method));
+            }
+            resultRows.add(new RuntimeRow(nextRowId++, aggregated));
+        }
+        return new RuntimeTable(resultColumns, resultRows);
+    }
+
+    private RuntimeTable applyFormatter(RuntimeTable inputTable, OperationSpec spec) {
+        List<RuntimeRow> transformedRows = inputTable.getRows().stream().map(row -> applyFormatter(row, spec)).toList();
+        return new RuntimeTable(inputTable.getColumns(), transformedRows);
+    }
+
+    private RuntimeTable applyDateFormatter(RuntimeTable inputTable, OperationSpec spec) {
+        List<RuntimeRow> transformedRows = inputTable.getRows().stream().map(row -> applyDateFormatter(row, spec)).toList();
+        return new RuntimeTable(inputTable.getColumns(), transformedRows);
     }
 
     private RuntimeTable mergeColumnResults(RuntimeTable baseTable, List<RuntimeTable> partialResults) {
@@ -179,15 +375,19 @@ public class NativeStageExecutor {
             }
         }
 
-        List<RuntimeRow> mergedRows = mergedByRowId.entrySet().stream()
-            .map(entry -> new RuntimeRow(entry.getKey(), entry.getValue()))
-            .toList();
+        List<RuntimeRow> mergedRows = new ArrayList<>();
+        for (RuntimeRow baseRow : baseTable.getRows()) {
+            mergedRows.add(new RuntimeRow(baseRow.getRowId(), mergedByRowId.get(baseRow.getRowId())));
+        }
         return new RuntimeTable(baseTable.getColumns(), mergedRows);
     }
 
     private List<String> resolveTouchedColumns(List<OperationSpec> specs, List<String> preferredOrder) {
         LinkedHashSet<String> columns = new LinkedHashSet<>();
         for (OperationSpec spec : specs) {
+            if (!COLUMN_NATIVE_TYPES.contains(spec.getType())) {
+                continue;
+            }
             Object rawColumns = spec.getParams().get("columns");
             if (!(rawColumns instanceof List<?> columnList)) {
                 continue;
@@ -221,7 +421,7 @@ public class NativeStageExecutor {
         Set<String> allowed = new LinkedHashSet<>(allowedColumns);
         List<OperationSpec> subset = new ArrayList<>();
         for (OperationSpec spec : specs) {
-            if (!spec.getParams().containsKey("columns")) {
+            if (!COLUMN_NATIVE_TYPES.contains(spec.getType())) {
                 continue;
             }
             Object rawColumns = spec.getParams().get("columns");
@@ -242,6 +442,48 @@ public class NativeStageExecutor {
         return subset;
     }
 
+    private List<RowExpressionEvaluator.CompiledBooleanExpression> compileConditions(
+        List<String> expressions,
+        List<String> availableColumns
+    ) {
+        return expressions.stream()
+            .map(expression -> rowExpressionEvaluator.compileBooleanExpression(expression, availableColumns))
+            .toList();
+    }
+
+    private RuntimeRow applyTag(
+        RuntimeRow row,
+        String tagColumn,
+        List<RowExpressionEvaluator.CompiledBooleanExpression> compiledConditions,
+        List<String> tags,
+        Object defaultTag
+    ) {
+        Object resolvedTag = defaultTag;
+        for (int index = 0; index < compiledConditions.size(); index++) {
+            if (rowExpressionEvaluator.evaluateBoolean(row, compiledConditions.get(index))) {
+                resolvedTag = tags.get(index);
+                break;
+            }
+        }
+        LinkedHashMap<String, Object> values = row.getValues();
+        values.put(tagColumn, resolvedTag);
+        return new RuntimeRow(row.getRowId(), values);
+    }
+
+    private RuntimeRow applyVectorizedColAssign(
+        RuntimeRow row,
+        String columnName,
+        RowExpressionEvaluator.CompiledBooleanExpression compiledCondition,
+        RowExpressionEvaluator.CompiledValueExpression compiledValue
+    ) {
+        LinkedHashMap<String, Object> values = row.getValues();
+        Object assignedValue = rowExpressionEvaluator.evaluateBoolean(row, compiledCondition)
+            ? rowExpressionEvaluator.evaluateValue(row, compiledValue)
+            : null;
+        values.put(columnName, assignedValue);
+        return new RuntimeRow(row.getRowId(), values);
+    }
+
     private static RuntimeRow renameRow(RuntimeRow row, List<String> currentColumns, Map<String, String> renameMap) {
         LinkedHashMap<String, Object> renamed = new LinkedHashMap<>();
         Map<String, Object> values = row.getValues();
@@ -252,8 +494,39 @@ public class NativeStageExecutor {
         return new RuntimeRow(row.getRowId(), renamed);
     }
 
+    private static RuntimeRow projectRow(RuntimeRow row, List<String> projectedColumns) {
+        LinkedHashMap<String, Object> projected = new LinkedHashMap<>();
+        Map<String, Object> values = row.getValues();
+        for (String column : projectedColumns) {
+            projected.put(column, values.get(column));
+        }
+        return new RuntimeRow(row.getRowId(), projected);
+    }
+
+    private static List<String> projectedColumns(List<String> currentColumns, OperationSpec spec) {
+        List<String> requiredColumns = asStringList(spec.getParams().get("requiredCols"));
+        if (requiredColumns.isEmpty()) {
+            return List.of();
+        }
+        LinkedHashSet<String> projected = new LinkedHashSet<>();
+        for (String column : currentColumns) {
+            if (requiredColumns.contains(column)) {
+                projected.add(column);
+            }
+        }
+        return new ArrayList<>(projected);
+    }
+
     private List<String> renameColumns(List<String> currentColumns, Map<String, String> renameMap) {
         return currentColumns.stream().map(column -> renameMap.getOrDefault(column, column)).toList();
+    }
+
+    private List<String> appendColumn(List<String> currentColumns, String columnName) {
+        List<String> nextColumns = new ArrayList<>(currentColumns);
+        if (!nextColumns.contains(columnName)) {
+            nextColumns.add(columnName);
+        }
+        return nextColumns;
     }
 
     private static RuntimeRow applyFormatter(RuntimeRow row, OperationSpec spec) {
@@ -272,6 +545,105 @@ public class NativeStageExecutor {
             values.put(column, transformDateValue(values.get(column), spec.getParams()));
         }
         return new RuntimeRow(row.getRowId(), values);
+    }
+
+    private Object aggregateValues(List<RuntimeRow> groupRows, String column, String method) {
+        List<Object> values = groupRows.stream()
+            .map(row -> row.getValues().get(column))
+            .filter(Objects::nonNull)
+            .toList();
+
+        if ("count".equals(method)) {
+            return (long) values.size();
+        }
+        if (values.isEmpty()) {
+            if ("sum".equals(method)) {
+                return 0L;
+            }
+            return null;
+        }
+        if ("sum".equals(method)) {
+            if (values.stream().allMatch(Number.class::isInstance)) {
+                boolean allIntegral = values.stream().allMatch(value -> value instanceof Byte
+                    || value instanceof Short
+                    || value instanceof Integer
+                    || value instanceof Long);
+                double sum = values.stream().mapToDouble(value -> ((Number) value).doubleValue()).sum();
+                return allIntegral ? Math.round(sum) : sum;
+            }
+            return values.stream().map(String::valueOf).reduce("", String::concat);
+        }
+        if ("mean".equals(method)) {
+            return values.stream().mapToDouble(value -> toDouble(value)).average().orElse(Double.NaN);
+        }
+        if ("min".equals(method)) {
+            return values.stream().min((left, right) -> compareValues(left, right, true)).orElse(null);
+        }
+        if ("max".equals(method)) {
+            return values.stream().max((left, right) -> compareValues(left, right, true)).orElse(null);
+        }
+        if ("std".equals(method)) {
+            if (values.size() <= 1) {
+                return null;
+            }
+            double mean = values.stream().mapToDouble(value -> toDouble(value)).average().orElse(Double.NaN);
+            double squaredDistance = values.stream()
+                .mapToDouble(value -> {
+                    double delta = toDouble(value) - mean;
+                    return delta * delta;
+                })
+                .sum();
+            return Math.sqrt(squaredDistance / (values.size() - 1));
+        }
+        throw new IllegalStateException("Unsupported aggregate method: " + method);
+    }
+
+    private int compareGroupKeys(List<Object> leftValues, List<Object> rightValues) {
+        int count = Math.min(leftValues.size(), rightValues.size());
+        for (int index = 0; index < count; index++) {
+            int comparison = compareValues(leftValues.get(index), rightValues.get(index), true);
+            if (comparison != 0) {
+                return comparison;
+            }
+        }
+        return Integer.compare(leftValues.size(), rightValues.size());
+    }
+
+    private static int compareValues(Object left, Object right, boolean ascending) {
+        if (left == null && right == null) {
+            return 0;
+        }
+        if (left == null) {
+            return 1;
+        }
+        if (right == null) {
+            return -1;
+        }
+
+        int comparison;
+        if (left instanceof Number leftNumber && right instanceof Number rightNumber) {
+            comparison = Double.compare(leftNumber.doubleValue(), rightNumber.doubleValue());
+        } else if (left instanceof Comparable<?> && right != null && left.getClass().isAssignableFrom(right.getClass())) {
+            @SuppressWarnings("unchecked")
+            Comparable<Object> comparable = (Comparable<Object>) left;
+            comparison = comparable.compareTo(right);
+        } else {
+            comparison = String.valueOf(left).compareTo(String.valueOf(right));
+        }
+        return ascending ? comparison : -comparison;
+    }
+
+    private static List<Boolean> normalizeAscending(List<String> sortColumns, Object rawAscending) {
+        List<Boolean> ascending = new ArrayList<>();
+        if (rawAscending instanceof List<?> rawList) {
+            rawList.forEach(value -> ascending.add(Boolean.valueOf(String.valueOf(value))));
+        }
+        while (ascending.size() < sortColumns.size()) {
+            ascending.add(Boolean.TRUE);
+        }
+        return ascending.isEmpty() && !sortColumns.isEmpty()
+            ? sortColumns.stream().map(column -> Boolean.TRUE).toList()
+            : ascending;
     }
 
     private static Object transformFormatterValue(Object value, String method, String valueExpr) {
@@ -383,5 +755,8 @@ public class NativeStageExecutor {
             return List.of();
         }
         return rawList.stream().map(String::valueOf).toList();
+    }
+
+    private record GroupKey(List<Object> values) {
     }
 }

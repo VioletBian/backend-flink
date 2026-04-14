@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import com.dataprocessor.flink.runtime.RowExpressionEvaluator;
 import com.dataprocessor.flink.runtime.RuntimeRow;
 import com.dataprocessor.flink.runtime.RuntimeTable;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,7 +15,7 @@ import org.junit.jupiter.api.Test;
 class StagePlannerTest {
 
     private final PipelineContractNormalizer normalizer = new PipelineContractNormalizer(new ObjectMapper());
-    private final StagePlanner planner = new StagePlanner(new OperatorCapabilityRegistry());
+    private final StagePlanner planner = new StagePlanner(new OperatorCapabilityRegistry(), new RowExpressionEvaluator());
 
     @Test
     void materializesRuntimeExecutionFromEnableParallelIntent() {
@@ -54,7 +55,7 @@ class StagePlannerTest {
     }
 
     @Test
-    void keepsBarrierOperatorsOnSerialFallback() {
+    void keepsNativeAggregateOnSerialStage() {
         List<Map<String, Object>> normalized = normalizer.normalizeJson("""
             [
               {
@@ -76,8 +77,104 @@ class StagePlannerTest {
         StagePlan stagePlan = planner.chooseStage(buildWideRuntimeTable(4, 2), candidateSegment, 0);
 
         Assertions.assertEquals(ExecutionConfig.SERIAL, stagePlan.getStrategy());
+        Assertions.assertTrue(stagePlan.isNativeCapable());
+        Assertions.assertEquals("FLINK_NATIVE", stagePlan.getExecutorKind());
+    }
+
+    @Test
+    void simpleFilterIsPlannedAsNativeRowStage() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson("""
+            [
+              {
+                "type": "filter",
+                "params": {
+                  "requiredCols": ["Client Account", "Price"],
+                  "condition": "`Price` > 10 and `Client Account` != null"
+                }
+              }
+            ]
+            """);
+        List<Map<String, Object>> prepared = planner.materializeRunSteps(normalized, ExecutionConfig.AUTO);
+        List<OperationSpec> specs = planner.parsePipelineSpecs(prepared, ExecutionConfig.AUTO);
+        StagePlanner.CandidateSegment candidateSegment = planner.collectCandidateSegment(specs, 0);
+
+        StagePlan stagePlan = planner.chooseStage(buildFilterRuntimeTable(), candidateSegment, 0);
+
+        Assertions.assertEquals(ExecutionConfig.SERIAL, stagePlan.getStrategy());
+        Assertions.assertTrue(stagePlan.isNativeCapable());
+    }
+
+    @Test
+    void pythonStyleFilterFallsBackToPythonStage() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson("""
+            [
+              {
+                "type": "filter",
+                "params": {
+                  "requiredCols": ["Client Account"],
+                  "condition": "`Client Account`.str.contains('700')"
+                }
+              }
+            ]
+            """);
+        List<Map<String, Object>> prepared = planner.materializeRunSteps(normalized, ExecutionConfig.AUTO);
+        List<OperationSpec> specs = planner.parsePipelineSpecs(prepared, ExecutionConfig.AUTO);
+        StagePlanner.CandidateSegment candidateSegment = planner.collectCandidateSegment(specs, 0);
+
+        StagePlan stagePlan = planner.chooseStage(buildFilterRuntimeTable(), candidateSegment, 0);
+
         Assertions.assertFalse(stagePlan.isNativeCapable());
-        Assertions.assertEquals("barrier-operator", stagePlan.getFallbackReason());
+        Assertions.assertEquals("filter-condition-requires-python-fallback", stagePlan.getFallbackReason());
+    }
+
+    @Test
+    void vectorizedColAssignIsPlannedAsNativeRowStage() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson("""
+            [
+              {
+                "type": "col_assign",
+                "params": {
+                  "method": "vectorized",
+                  "col_name": "Alert",
+                  "value_expr": "`Price` * 2",
+                  "condition": "`Client Account` != null"
+                }
+              }
+            ]
+            """);
+        List<Map<String, Object>> prepared = planner.materializeRunSteps(normalized, ExecutionConfig.AUTO);
+        List<OperationSpec> specs = planner.parsePipelineSpecs(prepared, ExecutionConfig.AUTO);
+        StagePlanner.CandidateSegment candidateSegment = planner.collectCandidateSegment(specs, 0);
+
+        StagePlan stagePlan = planner.chooseStage(buildFilterRuntimeTable(), candidateSegment, 0);
+
+        Assertions.assertTrue(stagePlan.isNativeCapable());
+        Assertions.assertEquals(ExecutionConfig.SERIAL, stagePlan.getStrategy());
+    }
+
+    @Test
+    void lambdaColAssignFallsBackToPythonStage() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson("""
+            [
+              {
+                "type": "col_assign",
+                "params": {
+                  "method": "lambda",
+                  "col_name": "Alert",
+                  "value_expr": "lambda row: row['Price'] * 2",
+                  "condition": "`Client Account` != null"
+                }
+              }
+            ]
+            """);
+        List<Map<String, Object>> prepared = planner.materializeRunSteps(normalized, ExecutionConfig.AUTO);
+        List<OperationSpec> specs = planner.parsePipelineSpecs(prepared, ExecutionConfig.AUTO);
+        StagePlanner.CandidateSegment candidateSegment = planner.collectCandidateSegment(specs, 0);
+
+        StagePlan stagePlan = planner.chooseStage(buildFilterRuntimeTable(), candidateSegment, 0);
+
+        Assertions.assertFalse(stagePlan.isNativeCapable());
+        Assertions.assertEquals("col-assign-method-requires-python-fallback", stagePlan.getFallbackReason());
     }
 
     private String buildWideFormatterPipeline(int columnCount) {
@@ -113,6 +210,15 @@ class StagePlannerTest {
             }
             rows.add(new RuntimeRow(rowIndex, values));
         }
+        return new RuntimeTable(columns, rows);
+    }
+
+    private RuntimeTable buildFilterRuntimeTable() {
+        List<String> columns = List.of("Client Account", "Price");
+        List<RuntimeRow> rows = List.of(
+            new RuntimeRow(0L, new LinkedHashMap<>(Map.of("Client Account", "7001", "Price", 11L))),
+            new RuntimeRow(1L, new LinkedHashMap<>(Map.of("Client Account", "7002", "Price", 9L)))
+        );
         return new RuntimeTable(columns, rows);
     }
 }

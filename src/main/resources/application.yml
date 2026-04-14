@@ -12,3 +12,9 @@ backend:
     python-command: python3
     python-runner-path: backend/scripts/reference_runner_cli.py
     python-working-directory: .
+    cors:
+      allowed-origin-patterns:
+        - http://localhost:*
+        - http://127.0.0.1:*
+        - https://localhost:*
+        - https://127.0.0.1:*
