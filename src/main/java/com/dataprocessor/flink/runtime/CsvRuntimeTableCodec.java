@@ -82,17 +82,54 @@ public class CsvRuntimeTableCodec {
         }
     }
 
-    public List<Map<String, Object>> toResponseRows(RuntimeTable table) {
-        List<Map<String, Object>> rows = new ArrayList<>();
+    public RuntimeTable readResponseMatrix(Object columnsPayload, Object dataPayload) {
+        // 中文说明：Java <-> Python fallback 优先走紧凑矩阵契约，避免再把中间表先编码成 CSV 再反序列化回来。
+        List<String> columns = toColumnList(columnsPayload);
+        if (!(dataPayload instanceof List<?> rawRows)) {
+            throw new IllegalArgumentException("Pipeline run response field `data` must be a JSON array.");
+        }
+
+        List<RuntimeRow> rows = new ArrayList<>();
+        long rowId = 0L;
+        for (Object rawRow : rawRows) {
+            if (!(rawRow instanceof List<?> cellValues)) {
+                throw new IllegalArgumentException("Pipeline run response `data` must be an array of row arrays.");
+            }
+            if (cellValues.size() != columns.size()) {
+                throw new IllegalArgumentException("Pipeline run response row width does not match `columns`.");
+            }
+            LinkedHashMap<String, Object> values = new LinkedHashMap<>();
+            for (int columnIndex = 0; columnIndex < columns.size(); columnIndex++) {
+                values.put(columns.get(columnIndex), cellValues.get(columnIndex));
+            }
+            rows.add(new RuntimeRow(rowId++, values));
+        }
+        return new RuntimeTable(columns, rows);
+    }
+
+    public List<List<Object>> toResponseDataMatrix(RuntimeTable table) {
+        List<List<Object>> rows = new ArrayList<>();
         for (RuntimeRow row : table.getRows()) {
-            LinkedHashMap<String, Object> payload = new LinkedHashMap<>();
+            List<Object> payload = new ArrayList<>();
             Map<String, Object> values = row.getValues();
             for (String column : table.getColumns()) {
-                payload.put(column, values.get(column));
+                payload.add(values.get(column));
             }
             rows.add(payload);
         }
         return rows;
+    }
+
+    private List<String> toColumnList(Object columnsPayload) {
+        if (!(columnsPayload instanceof List<?> rawColumns)) {
+            throw new IllegalArgumentException("Pipeline run response field `columns` must be a JSON array.");
+        }
+
+        List<String> columns = new ArrayList<>();
+        for (Object rawColumn : rawColumns) {
+            columns.add(String.valueOf(rawColumn));
+        }
+        return columns;
     }
 
     private Object inferValue(String raw) {

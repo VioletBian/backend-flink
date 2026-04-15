@@ -99,11 +99,7 @@ public class PipelineRunService {
                 objectMapper.writeValueAsString(stagePipeline),
                 false
             );
-            Object csv = response.get("csv");
-            if (csv == null) {
-                throw new IllegalStateException("Python fallback stage did not return csv output.");
-            }
-            return csvRuntimeTableCodec.read(String.valueOf(csv));
+            return readPythonFallbackRuntimeTable(response);
         } catch (IllegalStateException exception) {
             throw wrapPythonFallbackFailure(stagePlan, preparedPipeline, exception);
         } catch (JsonProcessingException exception) {
@@ -114,9 +110,24 @@ public class PipelineRunService {
     private Map<String, Object> buildBaseResponse(RuntimeTable runtimeTable) {
         LinkedHashMap<String, Object> response = new LinkedHashMap<>();
         response.put("columns", runtimeTable.getColumns());
-        response.put("rows", csvRuntimeTableCodec.toResponseRows(runtimeTable));
-        response.put("csv", csvRuntimeTableCodec.write(runtimeTable));
+        response.put("data", csvRuntimeTableCodec.toResponseDataMatrix(runtimeTable));
         return response;
+    }
+
+    // 中文说明：优先读取新的 columns + data 紧凑结构；保留 csv 兜底，兼容 Java/ Python 混部时的旧 runner。
+    private RuntimeTable readPythonFallbackRuntimeTable(Map<String, Object> response) {
+        Object columns = response.get("columns");
+        Object data = response.get("data");
+        if (columns != null && data != null) {
+            return csvRuntimeTableCodec.readResponseMatrix(columns, data);
+        }
+
+        Object csv = response.get("csv");
+        if (csv != null) {
+            return csvRuntimeTableCodec.read(String.valueOf(csv));
+        }
+
+        throw new IllegalStateException("Python fallback stage did not return table output.");
     }
 
     // 中文说明：debug 优先保证与 Python backend 的外部契约一致，因此 step_snapshots 仍复用 Python prepared pipeline 跑一遍。
