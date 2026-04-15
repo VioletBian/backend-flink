@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import com.dataprocessor.flink.config.BackendFlinkProperties;
@@ -39,20 +40,8 @@ public class PythonFallbackBridge {
             Files.write(inputFile, fileBytes);
             Files.writeString(pipelineFile, canonicalPipelineJson, StandardCharsets.UTF_8);
 
-            List<String> command = new ArrayList<>();
-            command.add(properties.getPythonCommand());
-            command.add(resolveRunnerPath().toString());
-            command.add("--input-file");
-            command.add(inputFile.toString());
-            command.add("--pipeline-file");
-            command.add(pipelineFile.toString());
-            command.add("--output-file");
-            command.add(outputFile.toString());
-            if (debug) {
-                command.add("--debug");
-            }
-
-            ProcessBuilder processBuilder = new ProcessBuilder(command);
+            PythonProcessSpec processSpec = buildProcessSpec(inputFile, pipelineFile, outputFile, debug);
+            ProcessBuilder processBuilder = new ProcessBuilder(processSpec.command());
             processBuilder.redirectErrorStream(true);
             processBuilder.directory(resolveProcessWorkingDirectory().toFile());
 
@@ -76,6 +65,50 @@ public class PythonFallbackBridge {
             deleteIfExists(pipelineFile);
             deleteIfExists(outputFile);
         }
+    }
+
+    // 中文说明：公司远端环境需要先激活虚拟环境时，统一在这里组装 shell 命令；未配置激活脚本时继续保持原来的直接执行方式。
+    PythonProcessSpec buildProcessSpec(Path inputFile, Path pipelineFile, Path outputFile, boolean debug) {
+        return buildProcessSpec(inputFile, pipelineFile, outputFile, debug, System.getProperty("os.name"));
+    }
+
+    PythonProcessSpec buildProcessSpec(
+        Path inputFile,
+        Path pipelineFile,
+        Path outputFile,
+        boolean debug,
+        String osName
+    ) {
+        List<String> pythonArguments = new ArrayList<>();
+        pythonArguments.add(resolveRunnerPath().toString());
+        pythonArguments.add("--input-file");
+        pythonArguments.add(inputFile.toString());
+        pythonArguments.add("--pipeline-file");
+        pythonArguments.add(pipelineFile.toString());
+        pythonArguments.add("--output-file");
+        pythonArguments.add(outputFile.toString());
+        if (debug) {
+            pythonArguments.add("--debug");
+        }
+
+        String activationScript = properties.getPythonActivationScript();
+        if (activationScript == null || activationScript.isBlank()) {
+            List<String> directCommand = new ArrayList<>();
+            directCommand.add(properties.getPythonCommand());
+            directCommand.addAll(pythonArguments);
+            return new PythonProcessSpec(directCommand);
+        }
+
+        Path activationScriptPath = resolveActivationScriptPath();
+        if (isWindowsShell(osName) || isWindowsBatchScript(activationScriptPath)) {
+            return new PythonProcessSpec(
+                List.of("cmd.exe", "/c", buildWindowsShellCommand(activationScriptPath, pythonArguments))
+            );
+        }
+
+        return new PythonProcessSpec(
+            List.of("/bin/sh", "-lc", buildPosixShellCommand(activationScriptPath, pythonArguments))
+        );
     }
 
     private void deleteIfExists(Path path) {
@@ -104,19 +137,32 @@ public class PythonFallbackBridge {
         return workspaceRoot.resolve(configuredPath).normalize();
     }
 
+    // 中文说明：runner/activate 这类路径都允许配置成绝对路径，或者相对项目根目录/工作目录的相对路径，方便在本地和远端环境复用。
+    private Path resolveActivationScriptPath() {
+        String configuredActivationScript = properties.getPythonActivationScript();
+        if (configuredActivationScript == null || configuredActivationScript.isBlank()) {
+            throw new IllegalStateException("Python activation script is not configured.");
+        }
+        return resolveConfiguredPath(configuredActivationScript);
+    }
+
     private Path resolveRunnerPath() {
+        return resolveConfiguredPath(properties.getPythonRunnerPath());
+    }
+
+    private Path resolveConfiguredPath(String configuredPathValue) {
         Path workspaceRoot = resolveWorkspaceRoot();
-        Path configuredRunnerPath = Path.of(properties.getPythonRunnerPath());
-        if (configuredRunnerPath.isAbsolute()) {
-            return configuredRunnerPath.normalize();
+        Path configuredPath = Path.of(configuredPathValue);
+        if (configuredPath.isAbsolute()) {
+            return configuredPath.normalize();
         }
 
-        Path candidate = workspaceRoot.resolve(configuredRunnerPath).normalize();
-        if (Files.exists(candidate)) {
-            return candidate;
+        Path workspaceCandidate = workspaceRoot.resolve(configuredPath).normalize();
+        if (Files.exists(workspaceCandidate)) {
+            return workspaceCandidate;
         }
 
-        return resolveProcessWorkingDirectory().resolve(configuredRunnerPath).normalize();
+        return resolveProcessWorkingDirectory().resolve(configuredPath).normalize();
     }
 
     private Path resolveWorkspaceRoot() {
@@ -131,5 +177,58 @@ public class PythonFallbackBridge {
         }
 
         return currentWorkingDirectory;
+    }
+
+    private boolean isWindowsShell(String osName) {
+        return osName != null && osName.toLowerCase(Locale.ROOT).contains("win");
+    }
+
+    private boolean isWindowsBatchScript(Path activationScriptPath) {
+        String fileName = activationScriptPath.getFileName() == null ? "" : activationScriptPath.getFileName().toString().toLowerCase(Locale.ROOT);
+        return fileName.endsWith(".bat") || fileName.endsWith(".cmd");
+    }
+
+    private String buildWindowsShellCommand(Path activationScriptPath, List<String> pythonArguments) {
+        return "call " + quoteForWindowsCmd(activationScriptPath.toString())
+            + " && "
+            + joinWindowsCommand(buildPythonCommandTokens(pythonArguments));
+    }
+
+    private String buildPosixShellCommand(Path activationScriptPath, List<String> pythonArguments) {
+        return ". " + quoteForPosixShell(activationScriptPath.toString())
+            + " && exec "
+            + joinPosixCommand(buildPythonCommandTokens(pythonArguments));
+    }
+
+    private List<String> buildPythonCommandTokens(List<String> pythonArguments) {
+        List<String> commandTokens = new ArrayList<>();
+        commandTokens.add(properties.getPythonCommand());
+        commandTokens.addAll(pythonArguments);
+        return commandTokens;
+    }
+
+    private String joinWindowsCommand(List<String> commandTokens) {
+        return commandTokens.stream()
+            .map(this::quoteForWindowsCmd)
+            .reduce((left, right) -> left + " " + right)
+            .orElse("");
+    }
+
+    private String joinPosixCommand(List<String> commandTokens) {
+        return commandTokens.stream()
+            .map(this::quoteForPosixShell)
+            .reduce((left, right) -> left + " " + right)
+            .orElse("");
+    }
+
+    private String quoteForWindowsCmd(String value) {
+        return "\"" + value.replace("\"", "\"\"") + "\"";
+    }
+
+    private String quoteForPosixShell(String value) {
+        return "'" + value.replace("'", "'\"'\"'") + "'";
+    }
+
+    record PythonProcessSpec(List<String> command) {
     }
 }

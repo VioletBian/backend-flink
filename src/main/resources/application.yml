@@ -10,6 +10,7 @@ backend:
   flink:
     mongo-collection-name: pipelines
     python-command: python3
+    python-activation-script:
     python-runner-path: backend/scripts/reference_runner_cli.py
     python-working-directory: .
     cors:

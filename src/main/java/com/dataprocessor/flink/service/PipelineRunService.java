@@ -5,6 +5,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import com.dataprocessor.flink.planner.ExecutionConfig;
 import com.dataprocessor.flink.planner.OperationSpec;
@@ -20,6 +22,12 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class PipelineRunService {
+
+    private static final String PYTHON_FALLBACK_FAILURE_PREFIX = "Python fallback bridge failed:";
+    private static final Pattern PYTHON_STEP_FAILURE_PATTERN = Pattern.compile(
+        "^Step\\s+(\\d+)\\s+\\(([^)]+)\\)\\s+failed:\\s*(.*)$",
+        Pattern.DOTALL
+    );
 
     private final PipelineContractNormalizer pipelineContractNormalizer;
     private final StagePlanner stagePlanner;
@@ -96,6 +104,8 @@ public class PipelineRunService {
                 throw new IllegalStateException("Python fallback stage did not return csv output.");
             }
             return csvRuntimeTableCodec.read(String.valueOf(csv));
+        } catch (IllegalStateException exception) {
+            throw wrapPythonFallbackFailure(stagePlan, preparedPipeline, exception);
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("Unable to serialize stage pipeline JSON.", exception);
         }
@@ -124,5 +134,36 @@ public class PipelineRunService {
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("Unable to serialize prepared pipeline JSON for debug mode.", exception);
         }
+    }
+
+    private RuntimeException wrapPythonFallbackFailure(
+        StagePlan stagePlan,
+        List<Map<String, Object>> preparedPipeline,
+        IllegalStateException exception
+    ) {
+        String message = exception.getMessage();
+        if (message == null || !message.startsWith(PYTHON_FALLBACK_FAILURE_PREFIX)) {
+            return exception;
+        }
+
+        String detail = message.substring(PYTHON_FALLBACK_FAILURE_PREFIX.length()).trim();
+        int resolvedStepIndex = stagePlan.getLogicalStepIndexes().isEmpty() ? 0 : stagePlan.getLogicalStepIndexes().get(0);
+        String resolvedOperatorType = stagePlan.getSpecs().isEmpty() ? "unknown" : stagePlan.getSpecs().get(0).getType();
+
+        Matcher matcher = PYTHON_STEP_FAILURE_PATTERN.matcher(detail);
+        if (matcher.matches()) {
+            int stageLocalStepIndex = Integer.parseInt(matcher.group(1));
+            List<Integer> logicalStepIndexes = stagePlan.getLogicalStepIndexes();
+            if (stageLocalStepIndex >= 0 && stageLocalStepIndex < logicalStepIndexes.size()) {
+                resolvedStepIndex = logicalStepIndexes.get(stageLocalStepIndex);
+                Object rawType = preparedPipeline.get(resolvedStepIndex).get("type");
+                if (rawType != null) {
+                    resolvedOperatorType = String.valueOf(rawType);
+                }
+            }
+            detail = matcher.group(3).trim();
+        }
+
+        return new PipelineStepExecutionException(resolvedStepIndex, resolvedOperatorType, detail, exception);
     }
 }

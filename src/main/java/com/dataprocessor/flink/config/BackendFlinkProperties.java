@@ -10,6 +10,7 @@ public class BackendFlinkProperties {
 
     private String mongoCollectionName = "pipelines";
     private String pythonCommand = "python3";
+    private String pythonActivationScript;
     private String pythonRunnerPath = "backend/scripts/reference_runner_cli.py";
     private String pythonWorkingDirectory = ".";
     private CorsProperties cors = new CorsProperties();
@@ -28,6 +29,14 @@ public class BackendFlinkProperties {
 
     public void setPythonCommand(String pythonCommand) {
         this.pythonCommand = pythonCommand;
+    }
+
+    public String getPythonActivationScript() {
+        return pythonActivationScript;
+    }
+
+    public void setPythonActivationScript(String pythonActivationScript) {
+        this.pythonActivationScript = pythonActivationScript;
     }
 
     public String getPythonRunnerPath() {

@@ -147,4 +147,80 @@ class PipelineRunServiceTest {
         Assertions.assertEquals(List.of("Client Account", "Desk", "Region", "Desk_mapped"), response.get("columns"));
         verify(pythonFallbackBridge, never()).run(any(), anyString(), anyBoolean());
     }
+
+    @Test
+    void nativeMissingSortColumnRaisesStepScopedBadRequest() {
+        PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
+
+        PipelineRunService pipelineRunService = new PipelineRunService(
+            new PipelineContractNormalizer(new ObjectMapper()),
+            new StagePlanner(new OperatorCapabilityRegistry(), new RowExpressionEvaluator()),
+            new NativeStageExecutor(Mockito.mock(BatchTableEnvironmentFactory.class), new RowExpressionEvaluator()),
+            pythonFallbackBridge,
+            new CsvRuntimeTableCodec(),
+            new ObjectMapper()
+        );
+
+        IllegalArgumentException exception = Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> pipelineRunService.runPipeline(
+                "A,B,C,D\n1,2,3,4\n".getBytes(StandardCharsets.UTF_8),
+                """
+                    [
+                      {
+                        "type": "sort",
+                        "params": {
+                          "by": ["E"],
+                          "ascending": [true]
+                        }
+                      }
+                    ]
+                    """,
+                false,
+                false
+            )
+        );
+
+        Assertions.assertEquals("Step 1 (sort) failed: Column `E` does not exist.", exception.getMessage());
+        verify(pythonFallbackBridge, never()).run(any(), anyString(), anyBoolean());
+    }
+
+    @Test
+    void fallbackFailureIsRemappedToOriginalPipelineStep() {
+        PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
+        when(pythonFallbackBridge.run(any(), anyString(), eq(false))).thenThrow(
+            new IllegalStateException("Python fallback bridge failed: Step 0 (series_transform) failed: column `E` does not exist.")
+        );
+
+        PipelineRunService pipelineRunService = new PipelineRunService(
+            new PipelineContractNormalizer(new ObjectMapper()),
+            new StagePlanner(new OperatorCapabilityRegistry(), new RowExpressionEvaluator()),
+            new NativeStageExecutor(Mockito.mock(BatchTableEnvironmentFactory.class), new RowExpressionEvaluator()),
+            pythonFallbackBridge,
+            new CsvRuntimeTableCodec(),
+            new ObjectMapper()
+        );
+
+        IllegalArgumentException exception = Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> pipelineRunService.runPipeline(
+                "A,B,C,D\n1,2,3,4\n".getBytes(StandardCharsets.UTF_8),
+                """
+                    [
+                      {
+                        "type": "series_transform",
+                        "params": {
+                          "on": ["E"],
+                          "transform_expr": "lambda x: x.shift(1)"
+                        }
+                      }
+                    ]
+                    """,
+                false,
+                false
+            )
+        );
+
+        Assertions.assertEquals("Step 1 (series_transform) failed: column `E` does not exist.", exception.getMessage());
+    }
 }

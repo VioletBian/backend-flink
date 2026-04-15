@@ -210,6 +210,25 @@ class NativeStageExecutorTest {
     }
 
     @Test
+    void raisesStepScopedErrorWhenSortColumnIsMissing() {
+        NativeStageExecutor executor = createExecutor();
+        OperationSpec sortSpec = new OperationSpec(
+            "sort",
+            Map.of("by", List.of("Missing Column"), "ascending", List.of(true)),
+            "index > -1",
+            0,
+            new ExecutionConfig(ExecutionConfig.SERIAL, null)
+        );
+
+        IllegalArgumentException exception = Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> executor.execute(buildSampleTable(), buildStagePlan(List.of(sortSpec), List.of("sort")))
+        );
+
+        Assertions.assertEquals("Step 1 (sort) failed: Column `Missing Column` does not exist.", exception.getMessage());
+    }
+
+    @Test
     void executesAggregateWithRenameAndResetsIndex() {
         NativeStageExecutor executor = createExecutor();
         RuntimeTable aggregateSource = new RuntimeTable(

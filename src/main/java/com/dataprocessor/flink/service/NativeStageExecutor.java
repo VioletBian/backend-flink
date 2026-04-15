@@ -85,75 +85,80 @@ public class NativeStageExecutor {
 
         DataStream<RuntimeRow> stream = env.fromCollection(inputTable.getRows()).setParallelism(stagePlan.getMaxWorkers());
         for (OperationSpec spec : stagePlan.getSpecs()) {
-            if ("filter".equals(spec.getType())) {
-                List<String> availableColumns = new ArrayList<>(currentColumns);
-                RowExpressionEvaluator.CompiledBooleanExpression compiledExpression =
-                    rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), availableColumns);
-                List<String> projectedColumns = projectedColumns(currentColumns, spec);
-                stream = stream.filter(row -> rowExpressionEvaluator.evaluateBoolean(row, compiledExpression))
-                    .setParallelism(stagePlan.getMaxWorkers());
-                if (!projectedColumns.isEmpty()) {
-                    stream = stream.map(row -> projectRow(row, projectedColumns)).setParallelism(stagePlan.getMaxWorkers());
-                    currentColumns = projectedColumns;
+            try {
+                validateRequiredInputColumns(currentColumns, spec);
+                if ("filter".equals(spec.getType())) {
+                    List<String> availableColumns = new ArrayList<>(currentColumns);
+                    RowExpressionEvaluator.CompiledBooleanExpression compiledExpression =
+                        rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), availableColumns);
+                    List<String> projectedColumns = projectedColumns(currentColumns, spec);
+                    stream = stream.filter(row -> rowExpressionEvaluator.evaluateBoolean(row, compiledExpression))
+                        .setParallelism(stagePlan.getMaxWorkers());
+                    if (!projectedColumns.isEmpty()) {
+                        stream = stream.map(row -> projectRow(row, projectedColumns)).setParallelism(stagePlan.getMaxWorkers());
+                        currentColumns = projectedColumns;
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if ("rename".equals(spec.getType())) {
-                List<String> beforeColumns = new ArrayList<>(currentColumns);
-                Map<String, String> renameMap = asStringMap(spec.getParams().get("map"));
-                stream = stream.map(row -> renameRow(row, beforeColumns, renameMap)).setParallelism(stagePlan.getMaxWorkers());
-                currentColumns = renameColumns(currentColumns, renameMap);
-                continue;
-            }
-            if ("tag".equals(spec.getType())) {
-                List<String> availableColumns = new ArrayList<>(currentColumns);
-                List<RowExpressionEvaluator.CompiledBooleanExpression> compiledConditions = compileConditions(
-                    asStringList(spec.getParams().get("conditions")),
-                    availableColumns
-                );
-                List<String> tags = asStringList(spec.getParams().get("tags"));
-                String tagColumn = String.valueOf(spec.getParams().get("tag_col_name"));
-                Object defaultTag = spec.getParams().get("default_tag");
-                stream = stream.map(
-                    row -> applyTag(row, tagColumn, compiledConditions, tags, defaultTag)
-                ).setParallelism(stagePlan.getMaxWorkers());
-                currentColumns = appendColumn(currentColumns, tagColumn);
-                continue;
-            }
-            if ("constant".equals(spec.getType())) {
-                stream = stream.map(row -> applyConstant(row, spec)).setParallelism(stagePlan.getMaxWorkers());
-                currentColumns = appendColumns(currentColumns, asStringList(spec.getParams().get("columns")));
-                continue;
-            }
-            if ("value_mapping".equals(spec.getType())) {
-                stream = stream.map(row -> applyValueMapping(row, spec)).setParallelism(stagePlan.getMaxWorkers());
-                if (!isReplaceMode(spec.getParams().get("mode"))) {
-                    currentColumns = appendColumns(currentColumns, asStringList(spec.getParams().get("result_columns")));
+                if ("rename".equals(spec.getType())) {
+                    List<String> beforeColumns = new ArrayList<>(currentColumns);
+                    Map<String, String> renameMap = asStringMap(spec.getParams().get("map"));
+                    stream = stream.map(row -> renameRow(row, beforeColumns, renameMap)).setParallelism(stagePlan.getMaxWorkers());
+                    currentColumns = renameColumns(currentColumns, renameMap);
+                    continue;
                 }
-                continue;
+                if ("tag".equals(spec.getType())) {
+                    List<String> availableColumns = new ArrayList<>(currentColumns);
+                    List<RowExpressionEvaluator.CompiledBooleanExpression> compiledConditions = compileConditions(
+                        asStringList(spec.getParams().get("conditions")),
+                        availableColumns
+                    );
+                    List<String> tags = asStringList(spec.getParams().get("tags"));
+                    String tagColumn = String.valueOf(spec.getParams().get("tag_col_name"));
+                    Object defaultTag = spec.getParams().get("default_tag");
+                    stream = stream.map(
+                        row -> applyTag(row, tagColumn, compiledConditions, tags, defaultTag)
+                    ).setParallelism(stagePlan.getMaxWorkers());
+                    currentColumns = appendColumn(currentColumns, tagColumn);
+                    continue;
+                }
+                if ("constant".equals(spec.getType())) {
+                    stream = stream.map(row -> applyConstant(row, spec)).setParallelism(stagePlan.getMaxWorkers());
+                    currentColumns = appendColumns(currentColumns, asStringList(spec.getParams().get("columns")));
+                    continue;
+                }
+                if ("value_mapping".equals(spec.getType())) {
+                    stream = stream.map(row -> applyValueMapping(row, spec)).setParallelism(stagePlan.getMaxWorkers());
+                    if (!isReplaceMode(spec.getParams().get("mode"))) {
+                        currentColumns = appendColumns(currentColumns, asStringList(spec.getParams().get("result_columns")));
+                    }
+                    continue;
+                }
+                if ("col_assign".equals(spec.getType())) {
+                    List<String> availableColumns = new ArrayList<>(currentColumns);
+                    RowExpressionEvaluator.CompiledBooleanExpression compiledCondition =
+                        rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), availableColumns);
+                    RowExpressionEvaluator.CompiledValueExpression compiledValue =
+                        rowExpressionEvaluator.compileValueExpression(String.valueOf(spec.getParams().get("value_expr")), availableColumns);
+                    String columnName = String.valueOf(spec.getParams().get("col_name"));
+                    stream = stream.map(
+                        row -> applyVectorizedColAssign(row, columnName, compiledCondition, compiledValue)
+                    ).setParallelism(stagePlan.getMaxWorkers());
+                    currentColumns = appendColumn(currentColumns, columnName);
+                    continue;
+                }
+                if ("formatter".equals(spec.getType())) {
+                    stream = stream.map(row -> applyFormatter(row, spec)).setParallelism(stagePlan.getMaxWorkers());
+                    continue;
+                }
+                if ("date_formatter".equals(spec.getType())) {
+                    stream = stream.map(row -> applyDateFormatter(row, spec)).setParallelism(stagePlan.getMaxWorkers());
+                    continue;
+                }
+                throw new IllegalStateException("Unsupported native row stage operator: " + spec.getType());
+            } catch (RuntimeException exception) {
+                throw PipelineStepExecutionException.wrap(spec, exception);
             }
-            if ("col_assign".equals(spec.getType())) {
-                List<String> availableColumns = new ArrayList<>(currentColumns);
-                RowExpressionEvaluator.CompiledBooleanExpression compiledCondition =
-                    rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), availableColumns);
-                RowExpressionEvaluator.CompiledValueExpression compiledValue =
-                    rowExpressionEvaluator.compileValueExpression(String.valueOf(spec.getParams().get("value_expr")), availableColumns);
-                String columnName = String.valueOf(spec.getParams().get("col_name"));
-                stream = stream.map(
-                    row -> applyVectorizedColAssign(row, columnName, compiledCondition, compiledValue)
-                ).setParallelism(stagePlan.getMaxWorkers());
-                currentColumns = appendColumn(currentColumns, columnName);
-                continue;
-            }
-            if ("formatter".equals(spec.getType())) {
-                stream = stream.map(row -> applyFormatter(row, spec)).setParallelism(stagePlan.getMaxWorkers());
-                continue;
-            }
-            if ("date_formatter".equals(spec.getType())) {
-                stream = stream.map(row -> applyDateFormatter(row, spec)).setParallelism(stagePlan.getMaxWorkers());
-                continue;
-            }
-            throw new IllegalStateException("Unsupported native row stage operator: " + spec.getType());
         }
 
         List<RuntimeRow> resultRows = new ArrayList<>();
@@ -199,7 +204,12 @@ public class NativeStageExecutor {
     private RuntimeTable executeSerialStage(RuntimeTable inputTable, List<OperationSpec> specs) {
         RuntimeTable currentTable = inputTable;
         for (OperationSpec spec : specs) {
-            currentTable = executeSerialSpec(currentTable, spec);
+            try {
+                validateRequiredInputColumns(currentTable.getColumns(), spec);
+                currentTable = executeSerialSpec(currentTable, spec);
+            } catch (RuntimeException exception) {
+                throw PipelineStepExecutionException.wrap(spec, exception);
+            }
         }
         return currentTable;
     }
@@ -386,6 +396,25 @@ public class NativeStageExecutor {
     private RuntimeTable applyDateFormatter(RuntimeTable inputTable, OperationSpec spec) {
         List<RuntimeRow> transformedRows = inputTable.getRows().stream().map(row -> applyDateFormatter(row, spec)).toList();
         return new RuntimeTable(inputTable.getColumns(), transformedRows);
+    }
+
+    private void validateRequiredInputColumns(List<String> availableColumns, OperationSpec spec) {
+        LinkedHashSet<String> missingColumns = new LinkedHashSet<>();
+        if ("sort".equals(spec.getType())) {
+            missingColumns.addAll(findMissingColumns(availableColumns, asStringList(spec.getParams().get("by"))));
+        } else if ("aggregate".equals(spec.getType())) {
+            missingColumns.addAll(findMissingColumns(availableColumns, asStringList(spec.getParams().get("by"))));
+            Object rawActions = spec.getParams().get("actions");
+            if (rawActions instanceof Map<?, ?> actions) {
+                missingColumns.addAll(findMissingColumns(availableColumns, asStringList(actions.get("on"))));
+            }
+        } else if ("formatter".equals(spec.getType()) || "date_formatter".equals(spec.getType())) {
+            missingColumns.addAll(findMissingColumns(availableColumns, asStringList(spec.getParams().get("columns"))));
+        }
+
+        if (!missingColumns.isEmpty()) {
+            throw new PipelineStepExecutionException(spec, buildMissingColumnsDetail(missingColumns));
+        }
     }
 
     private RuntimeTable mergeColumnResults(RuntimeTable baseTable, List<RuntimeTable> partialResults, List<String> finalColumns) {
@@ -880,6 +909,24 @@ public class NativeStageExecutor {
             return number.longValue();
         }
         return Long.parseLong(String.valueOf(value));
+    }
+
+    private static List<String> findMissingColumns(List<String> availableColumns, List<String> requiredColumns) {
+        LinkedHashSet<String> available = new LinkedHashSet<>(availableColumns);
+        LinkedHashSet<String> missing = new LinkedHashSet<>();
+        for (String column : requiredColumns) {
+            if (!available.contains(column)) {
+                missing.add(column);
+            }
+        }
+        return new ArrayList<>(missing);
+    }
+
+    private static String buildMissingColumnsDetail(List<String> missingColumns) {
+        if (missingColumns.size() == 1) {
+            return "Column `" + missingColumns.get(0) + "` does not exist.";
+        }
+        return "Columns " + missingColumns.stream().map(column -> "`" + column + "`").toList() + " do not exist.";
     }
 
     @SuppressWarnings("unchecked")
