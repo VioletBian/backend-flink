@@ -55,6 +55,75 @@ class StagePlannerTest {
     }
 
     @Test
+    void choosesColumnStageForWideConstantPipeline() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson(buildWideConstantPipeline(40));
+        List<Map<String, Object>> prepared = planner.materializeRunSteps(normalized, ExecutionConfig.AUTO);
+        List<OperationSpec> specs = planner.parsePipelineSpecs(prepared, ExecutionConfig.AUTO);
+        StagePlanner.CandidateSegment candidateSegment = planner.collectCandidateSegment(specs, 0);
+
+        StagePlan stagePlan = planner.chooseStage(buildWideRuntimeTable(8, 2), candidateSegment, 0);
+
+        Assertions.assertEquals(ExecutionConfig.COLUMNS, stagePlan.getStrategy());
+        Assertions.assertTrue(stagePlan.isNativeCapable());
+    }
+
+    @Test
+    void choosesColumnStageForWideValueMappingPipeline() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson(buildWideValueMappingPipeline(40));
+        List<Map<String, Object>> prepared = planner.materializeRunSteps(normalized, ExecutionConfig.AUTO);
+        List<OperationSpec> specs = planner.parsePipelineSpecs(prepared, ExecutionConfig.AUTO);
+        StagePlanner.CandidateSegment candidateSegment = planner.collectCandidateSegment(specs, 0);
+
+        StagePlan stagePlan = planner.chooseStage(buildWideRuntimeTable(8, 40), candidateSegment, 0);
+
+        Assertions.assertEquals(ExecutionConfig.COLUMNS, stagePlan.getStrategy());
+        Assertions.assertTrue(stagePlan.isNativeCapable());
+    }
+
+    @Test
+    void constantSupportsForcedRowsExecution() {
+        List<Map<String, Object>> prepared = List.of(
+            new LinkedHashMap<>(Map.of(
+                "type", "constant",
+                "params", new LinkedHashMap<>(Map.of(
+                    "columns", new LinkedHashMap<>(Map.of("Desk", "SH"))
+                )),
+                "execution", new LinkedHashMap<>(Map.of("strategy", "rows"))
+            ))
+        );
+        List<OperationSpec> specs = planner.parsePipelineSpecs(prepared, ExecutionConfig.SERIAL);
+        StagePlanner.CandidateSegment candidateSegment = planner.collectCandidateSegment(specs, 0);
+
+        StagePlan stagePlan = planner.chooseStage(buildFilterRuntimeTable(), candidateSegment, 0);
+
+        Assertions.assertEquals(ExecutionConfig.ROWS, stagePlan.getStrategy());
+        Assertions.assertTrue(stagePlan.isNativeCapable());
+    }
+
+    @Test
+    void valueMappingSupportsForcedRowsExecution() {
+        List<Map<String, Object>> prepared = List.of(
+            new LinkedHashMap<>(Map.of(
+                "type", "value_mapping",
+                "params", new LinkedHashMap<>(Map.of(
+                    "mode", "replace",
+                    "mappings", new LinkedHashMap<>(Map.of(
+                        "Client Account", new LinkedHashMap<>(Map.of("7001", "VIP"))
+                    ))
+                )),
+                "execution", new LinkedHashMap<>(Map.of("strategy", "rows"))
+            ))
+        );
+        List<OperationSpec> specs = planner.parsePipelineSpecs(prepared, ExecutionConfig.SERIAL);
+        StagePlanner.CandidateSegment candidateSegment = planner.collectCandidateSegment(specs, 0);
+
+        StagePlan stagePlan = planner.chooseStage(buildFilterRuntimeTable(), candidateSegment, 0);
+
+        Assertions.assertEquals(ExecutionConfig.ROWS, stagePlan.getStrategy());
+        Assertions.assertTrue(stagePlan.isNativeCapable());
+    }
+
+    @Test
     void keepsNativeAggregateOnSerialStage() {
         List<Map<String, Object>> normalized = normalizer.normalizeJson("""
             [
@@ -194,6 +263,47 @@ class StagePlannerTest {
               }
             ]
             """.formatted(new ObjectMapper().valueToTree(columns).toString());
+    }
+
+    private String buildWideConstantPipeline(int columnCount) {
+        LinkedHashMap<String, Object> constants = new LinkedHashMap<>();
+        for (int index = 0; index < columnCount; index++) {
+            constants.put("const_" + index, "value_" + index);
+        }
+        return """
+            [
+              {
+                "type": "constant",
+                "params": {
+                  "columns": %s
+                }
+              }
+            ]
+            """.formatted(new ObjectMapper().valueToTree(constants).toString());
+    }
+
+    private String buildWideValueMappingPipeline(int columnCount) {
+        LinkedHashMap<String, Object> mappings = new LinkedHashMap<>();
+        for (int index = 0; index < columnCount; index++) {
+            mappings.put(
+                "col_" + index,
+                new LinkedHashMap<>(Map.of(
+                    "value_0", "mapped_" + index
+                ))
+            );
+        }
+        return """
+            [
+              {
+                "type": "value_mapping",
+                "params": {
+                  "mode": "map",
+                  "mappings": %s,
+                  "default": "OTHER"
+                }
+              }
+            ]
+            """.formatted(new ObjectMapper().valueToTree(mappings).toString());
     }
 
     private RuntimeTable buildWideRuntimeTable(int rowCount, int columnCount) {

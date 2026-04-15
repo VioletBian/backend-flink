@@ -18,6 +18,14 @@ public class OperatorCapabilityRegistry {
         capabilities.put("aggregate", new OperatorCapability("aggregate", Set.of(), true));
         capabilities.put("sort", new OperatorCapability("sort", Set.of(), true));
         capabilities.put("tag", new OperatorCapability("tag", Set.of(ExecutionConfig.ROWS), false));
+        capabilities.put(
+            "constant",
+            new OperatorCapability("constant", Set.of(ExecutionConfig.ROWS, ExecutionConfig.COLUMNS), false)
+        );
+        capabilities.put(
+            "value_mapping",
+            new OperatorCapability("value_mapping", Set.of(ExecutionConfig.ROWS, ExecutionConfig.COLUMNS), false)
+        );
         capabilities.put("col_assign", new OperatorCapability("col_assign", Set.of(ExecutionConfig.ROWS), false));
         capabilities.put("col_apply", new OperatorCapability("col_apply", Set.of(), true));
         capabilities.put("series_transform", new OperatorCapability("series_transform", Set.of(ExecutionConfig.COLUMNS), false));

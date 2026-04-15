@@ -47,7 +47,7 @@ public class NativeStageExecutor {
         "dd/MM/yyyy", "dd/MM/yyyy",
         "MM/dd/yyyy", "MM/dd/yyyy"
     );
-    private static final Set<String> COLUMN_NATIVE_TYPES = Set.of("formatter", "date_formatter");
+    private static final Set<String> COLUMN_NATIVE_TYPES = Set.of("constant", "value_mapping", "formatter", "date_formatter");
     private final BatchTableEnvironmentFactory batchTableEnvironmentFactory;
     private final RowExpressionEvaluator rowExpressionEvaluator;
 
@@ -120,6 +120,18 @@ public class NativeStageExecutor {
                 currentColumns = appendColumn(currentColumns, tagColumn);
                 continue;
             }
+            if ("constant".equals(spec.getType())) {
+                stream = stream.map(row -> applyConstant(row, spec)).setParallelism(stagePlan.getMaxWorkers());
+                currentColumns = appendColumns(currentColumns, asStringList(spec.getParams().get("columns")));
+                continue;
+            }
+            if ("value_mapping".equals(spec.getType())) {
+                stream = stream.map(row -> applyValueMapping(row, spec)).setParallelism(stagePlan.getMaxWorkers());
+                if (!isReplaceMode(spec.getParams().get("mode"))) {
+                    currentColumns = appendColumns(currentColumns, asStringList(spec.getParams().get("result_columns")));
+                }
+                continue;
+            }
             if ("col_assign".equals(spec.getType())) {
                 List<String> availableColumns = new ArrayList<>(currentColumns);
                 RowExpressionEvaluator.CompiledBooleanExpression compiledCondition =
@@ -178,7 +190,7 @@ public class NativeStageExecutor {
                 .toList();
 
             List<RuntimeTable> partialResults = futures.stream().map(CompletableFuture::join).toList();
-            return mergeColumnResults(inputTable, partialResults);
+            return mergeColumnResults(inputTable, partialResults, previewColumnsAfterSpecs(inputTable.getColumns(), stagePlan.getSpecs()));
         } finally {
             executorService.shutdown();
         }
@@ -207,6 +219,12 @@ public class NativeStageExecutor {
         }
         if ("tag".equals(spec.getType())) {
             return applyTag(inputTable, spec);
+        }
+        if ("constant".equals(spec.getType())) {
+            return applyConstant(inputTable, spec);
+        }
+        if ("value_mapping".equals(spec.getType())) {
+            return applyValueMapping(inputTable, spec);
         }
         if ("col_assign".equals(spec.getType())) {
             return applyVectorizedColAssign(inputTable, spec);
@@ -256,6 +274,19 @@ public class NativeStageExecutor {
             .map(row -> applyTag(row, tagColumn, compiledConditions, tags, defaultTag))
             .toList();
         return new RuntimeTable(appendColumn(currentColumns, tagColumn), taggedRows);
+    }
+
+    private RuntimeTable applyConstant(RuntimeTable inputTable, OperationSpec spec) {
+        List<RuntimeRow> resultRows = inputTable.getRows().stream().map(row -> applyConstant(row, spec)).toList();
+        return new RuntimeTable(appendColumns(inputTable.getColumns(), asStringList(spec.getParams().get("columns"))), resultRows);
+    }
+
+    private RuntimeTable applyValueMapping(RuntimeTable inputTable, OperationSpec spec) {
+        List<RuntimeRow> resultRows = inputTable.getRows().stream().map(row -> applyValueMapping(row, spec)).toList();
+        List<String> resultColumns = isReplaceMode(spec.getParams().get("mode"))
+            ? inputTable.getColumns()
+            : appendColumns(inputTable.getColumns(), asStringList(spec.getParams().get("result_columns")));
+        return new RuntimeTable(resultColumns, resultRows);
     }
 
     private RuntimeTable applyVectorizedColAssign(RuntimeTable inputTable, OperationSpec spec) {
@@ -357,7 +388,7 @@ public class NativeStageExecutor {
         return new RuntimeTable(inputTable.getColumns(), transformedRows);
     }
 
-    private RuntimeTable mergeColumnResults(RuntimeTable baseTable, List<RuntimeTable> partialResults) {
+    private RuntimeTable mergeColumnResults(RuntimeTable baseTable, List<RuntimeTable> partialResults, List<String> finalColumns) {
         Map<Long, LinkedHashMap<String, Object>> mergedByRowId = new LinkedHashMap<>();
         for (RuntimeRow row : baseTable.getRows()) {
             mergedByRowId.put(row.getRowId(), row.getValues());
@@ -379,7 +410,7 @@ public class NativeStageExecutor {
         for (RuntimeRow baseRow : baseTable.getRows()) {
             mergedRows.add(new RuntimeRow(baseRow.getRowId(), mergedByRowId.get(baseRow.getRowId())));
         }
-        return new RuntimeTable(baseTable.getColumns(), mergedRows);
+        return new RuntimeTable(finalColumns, mergedRows);
     }
 
     private List<String> resolveTouchedColumns(List<OperationSpec> specs, List<String> preferredOrder) {
@@ -399,6 +430,13 @@ public class NativeStageExecutor {
         List<String> ordered = new ArrayList<>();
         for (String column : preferredOrder) {
             if (columns.contains(column)) {
+                ordered.add(column);
+            }
+        }
+        // 中文说明：constant 会新增输入表里还不存在的列，列式切分时这些目标列也必须保留，
+        // 否则会被误判成“没有可切分列”而退回 serial。
+        for (String column : columns) {
+            if (!ordered.contains(column)) {
                 ordered.add(column);
             }
         }
@@ -424,6 +462,50 @@ public class NativeStageExecutor {
             if (!COLUMN_NATIVE_TYPES.contains(spec.getType())) {
                 continue;
             }
+            if ("constant".equals(spec.getType())) {
+                List<String> selectedColumns = asStringList(spec.getParams().get("columns")).stream()
+                    .filter(allowed::contains)
+                    .toList();
+                if (selectedColumns.isEmpty()) {
+                    continue;
+                }
+                Map<String, Object> params = new LinkedHashMap<>(spec.getParams());
+                LinkedHashMap<String, Object> selectedValues = new LinkedHashMap<>();
+                asObjectMap(params.get("values")).forEach((column, value) -> {
+                    if (selectedColumns.contains(column)) {
+                        selectedValues.put(column, value);
+                    }
+                });
+                params.put("columns", selectedColumns);
+                params.put("values", selectedValues);
+                subset.add(new OperationSpec(spec.getType(), params, spec.getCondition(), spec.getSourceStepIndex(), spec.getExecution()));
+                continue;
+            }
+            if ("value_mapping".equals(spec.getType())) {
+                List<String> selectedColumns = asStringList(spec.getParams().get("columns")).stream()
+                    .filter(allowed::contains)
+                    .toList();
+                if (selectedColumns.isEmpty()) {
+                    continue;
+                }
+                Map<String, Object> params = new LinkedHashMap<>(spec.getParams());
+                LinkedHashMap<String, Map<String, Object>> selectedMappings = new LinkedHashMap<>();
+                asNestedObjectMap(params.get("mappings")).forEach((column, mapping) -> {
+                    if (selectedColumns.contains(column)) {
+                        selectedMappings.put(column, mapping);
+                    }
+                });
+                params.put("columns", selectedColumns);
+                params.put("mappings", selectedMappings);
+                params.put(
+                    "result_columns",
+                    isReplaceMode(params.get("mode"))
+                        ? selectedColumns
+                        : selectedColumns.stream().map(column -> column + "_mapped").toList()
+                );
+                subset.add(new OperationSpec(spec.getType(), params, spec.getCondition(), spec.getSourceStepIndex(), spec.getExecution()));
+                continue;
+            }
             Object rawColumns = spec.getParams().get("columns");
             if (!(rawColumns instanceof List<?> columnList)) {
                 continue;
@@ -435,7 +517,7 @@ public class NativeStageExecutor {
             if (selectedColumns.isEmpty()) {
                 continue;
             }
-            Map<String, Object> params = spec.getParams();
+            Map<String, Object> params = new LinkedHashMap<>(spec.getParams());
             params.put("columns", selectedColumns);
             subset.add(new OperationSpec(spec.getType(), params, spec.getCondition(), spec.getSourceStepIndex(), spec.getExecution()));
         }
@@ -467,6 +549,41 @@ public class NativeStageExecutor {
         }
         LinkedHashMap<String, Object> values = row.getValues();
         values.put(tagColumn, resolvedTag);
+        return new RuntimeRow(row.getRowId(), values);
+    }
+
+    private RuntimeRow applyConstant(RuntimeRow row, OperationSpec spec) {
+        LinkedHashMap<String, Object> values = row.getValues();
+        asObjectMap(spec.getParams().get("values")).forEach(values::put);
+        return new RuntimeRow(row.getRowId(), values);
+    }
+
+    private RuntimeRow applyValueMapping(RuntimeRow row, OperationSpec spec) {
+        LinkedHashMap<String, Object> values = row.getValues();
+        LinkedHashMap<String, Map<String, Object>> mappings = asNestedObjectMap(spec.getParams().get("mappings"));
+        Object defaultValue = spec.getParams().get("default");
+        boolean replaceMode = isReplaceMode(spec.getParams().get("mode"));
+
+        for (String columnName : asStringList(spec.getParams().get("columns"))) {
+            if (!values.containsKey(columnName)) {
+                continue;
+            }
+            Object currentValue = values.get(columnName);
+            Map<String, Object> mapping = mappings.get(columnName);
+            Object mappedValue = resolveMappedValue(mapping, currentValue);
+            if (replaceMode) {
+                values.put(
+                    columnName,
+                    mappedValue != null
+                        ? mappedValue
+                        : (hasExplicitDefault(defaultValue) ? defaultValue : currentValue)
+                );
+                continue;
+            }
+            String targetColumn = columnName + "_mapped";
+            values.put(targetColumn, mappedValue != null ? mappedValue : (hasExplicitDefault(defaultValue) ? defaultValue : null));
+        }
+
         return new RuntimeRow(row.getRowId(), values);
     }
 
@@ -527,6 +644,31 @@ public class NativeStageExecutor {
             nextColumns.add(columnName);
         }
         return nextColumns;
+    }
+
+    private List<String> appendColumns(List<String> currentColumns, List<String> columnNames) {
+        List<String> nextColumns = new ArrayList<>(currentColumns);
+        for (String columnName : columnNames) {
+            if (!nextColumns.contains(columnName)) {
+                nextColumns.add(columnName);
+            }
+        }
+        return nextColumns;
+    }
+
+    // 中文说明：列式并发回拼时需要按逻辑算子顺序重建最终列序，避免新增列因为 worker 分组顺序而漂移。
+    private List<String> previewColumnsAfterSpecs(List<String> currentColumns, List<OperationSpec> specs) {
+        List<String> previewColumns = new ArrayList<>(currentColumns);
+        for (OperationSpec spec : specs) {
+            if ("constant".equals(spec.getType())) {
+                previewColumns = appendColumns(previewColumns, asStringList(spec.getParams().get("columns")));
+                continue;
+            }
+            if ("value_mapping".equals(spec.getType()) && !isReplaceMode(spec.getParams().get("mode"))) {
+                previewColumns = appendColumns(previewColumns, asStringList(spec.getParams().get("result_columns")));
+            }
+        }
+        return previewColumns;
     }
 
     private static RuntimeRow applyFormatter(RuntimeRow row, OperationSpec spec) {
@@ -755,6 +897,47 @@ public class NativeStageExecutor {
             return List.of();
         }
         return rawList.stream().map(String::valueOf).toList();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static LinkedHashMap<String, Object> asObjectMap(Object rawValue) {
+        if (!(rawValue instanceof Map<?, ?> rawMap)) {
+            return new LinkedHashMap<>();
+        }
+        LinkedHashMap<String, Object> values = new LinkedHashMap<>();
+        rawMap.forEach((key, value) -> values.put(String.valueOf(key), value));
+        return values;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static LinkedHashMap<String, Map<String, Object>> asNestedObjectMap(Object rawValue) {
+        if (!(rawValue instanceof Map<?, ?> rawMap)) {
+            return new LinkedHashMap<>();
+        }
+        LinkedHashMap<String, Map<String, Object>> values = new LinkedHashMap<>();
+        rawMap.forEach((key, value) -> {
+            LinkedHashMap<String, Object> nested = new LinkedHashMap<>();
+            if (value instanceof Map<?, ?> nestedMap) {
+                nestedMap.forEach((nestedKey, nestedValue) -> nested.put(String.valueOf(nestedKey), nestedValue));
+            }
+            values.put(String.valueOf(key), nested);
+        });
+        return values;
+    }
+
+    private static boolean isReplaceMode(Object rawMode) {
+        return "replace".equals(String.valueOf(rawMode == null ? "replace" : rawMode));
+    }
+
+    private static boolean hasExplicitDefault(Object defaultValue) {
+        return defaultValue != null && (!(defaultValue instanceof String stringValue) || !stringValue.isEmpty());
+    }
+
+    private static Object resolveMappedValue(Map<String, Object> mapping, Object currentValue) {
+        if (mapping == null) {
+            return null;
+        }
+        return mapping.get(currentValue);
     }
 
     private record GroupKey(List<Object> values) {

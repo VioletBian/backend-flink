@@ -100,4 +100,51 @@ class PipelineRunServiceTest {
         Assertions.assertEquals(List.of("Client Account", "Price", "Alert"), response.get("columns"));
         verify(pythonFallbackBridge, never()).run(any(), anyString(), anyBoolean());
     }
+
+    @Test
+    void constantAndValueMappingPipelineStaysOnNativePath() {
+        PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
+
+        PipelineRunService pipelineRunService = new PipelineRunService(
+            new PipelineContractNormalizer(new ObjectMapper()),
+            new StagePlanner(new OperatorCapabilityRegistry(), new RowExpressionEvaluator()),
+            new NativeStageExecutor(Mockito.mock(BatchTableEnvironmentFactory.class), new RowExpressionEvaluator()),
+            pythonFallbackBridge,
+            new CsvRuntimeTableCodec(),
+            new ObjectMapper()
+        );
+
+        Map<String, Object> response = pipelineRunService.runPipeline(
+            "Client Account,Desk\n7001,SH\n7002,LDN\n".getBytes(StandardCharsets.UTF_8),
+            """
+                [
+                  {
+                    "type": "constant",
+                    "params": {
+                      "columns": {
+                        "Region": "APAC"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value_mapping",
+                    "params": {
+                      "mode": "map",
+                      "mappings": {
+                        "Desk": {
+                          "SH": "CN"
+                        }
+                      },
+                      "default": "OTHER"
+                    }
+                  }
+                ]
+                """,
+            false,
+            false
+        );
+
+        Assertions.assertEquals(List.of("Client Account", "Desk", "Region", "Desk_mapped"), response.get("columns"));
+        verify(pythonFallbackBridge, never()).run(any(), anyString(), anyBoolean());
+    }
 }

@@ -50,10 +50,40 @@ class PipelineContractNormalizerTest {
         IllegalArgumentException exception = Assertions.assertThrows(
             IllegalArgumentException.class,
             () -> normalizer.normalizeJson("""
-                [{"type": "value_mapping", "params": {}}]
+                [{"type": "mystery_operator", "params": {}}]
                 """)
         );
 
         Assertions.assertTrue(exception.getMessage().contains("Unsupported operator"));
+    }
+
+    @Test
+    void acceptsConstantAndValueMappingOperators() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson("""
+            [
+              {
+                "type": "constant",
+                "params": {
+                  "columns": {
+                    "Country": "CN"
+                  }
+                }
+              },
+              {
+                "type": "value_mapping",
+                "params": {
+                  "mode": "replace",
+                  "mappings": {
+                    "Client Account": {
+                      "7001": "VIP"
+                    }
+                  }
+                }
+              }
+            ]
+            """);
+
+        Assertions.assertEquals("constant", normalized.get(0).get("type"));
+        Assertions.assertEquals("value_mapping", normalized.get(1).get("type"));
     }
 }

@@ -30,17 +30,21 @@ public class StagePlanner {
         "filter",
         "rename",
         "tag",
+        "constant",
+        "value_mapping",
         "col_assign",
         "formatter",
         "date_formatter"
     );
-    private static final Set<String> COLUMN_NATIVE_TYPES = Set.of("formatter", "date_formatter");
+    private static final Set<String> COLUMN_NATIVE_TYPES = Set.of("constant", "value_mapping", "formatter", "date_formatter");
     private static final Set<String> SERIAL_NATIVE_TYPES = Set.of(
         "filter",
         "rename",
         "aggregate",
         "sort",
         "tag",
+        "constant",
+        "value_mapping",
         "col_assign",
         "formatter",
         "date_formatter"
@@ -134,6 +138,34 @@ public class StagePlanner {
                 tagParams.put("tags", asStringList(params.get("tags")));
                 tagParams.put("default_tag", params.get("default_tag"));
                 specs.add(new OperationSpec("tag", tagParams, DEFAULT_CONDITION, stepIndex, execution));
+                continue;
+            }
+
+            // 中文说明：constant / value_mapping 都是纯列局部算子，执行期既可以按行切，也可以按列切。
+            if ("constant".equals(operatorType)) {
+                LinkedHashMap<String, Object> constantParams = new LinkedHashMap<>();
+                LinkedHashMap<String, Object> constantValues = asObjectMap(params.get("columns"));
+                constantParams.put("values", constantValues);
+                constantParams.put("columns", new ArrayList<>(constantValues.keySet()));
+                specs.add(new OperationSpec("constant", constantParams, DEFAULT_CONDITION, stepIndex, execution));
+                continue;
+            }
+
+            if ("value_mapping".equals(operatorType)) {
+                LinkedHashMap<String, Object> valueMappingParams = new LinkedHashMap<>();
+                LinkedHashMap<String, Map<String, Object>> mappings = asNestedObjectMap(params.get("mappings"));
+                List<String> mappingColumns = new ArrayList<>(mappings.keySet());
+                valueMappingParams.put("mode", String.valueOf(params.getOrDefault("mode", "replace")));
+                valueMappingParams.put("mappings", mappings);
+                valueMappingParams.put("default", params.get("default"));
+                valueMappingParams.put("columns", mappingColumns);
+                valueMappingParams.put(
+                    "result_columns",
+                    isReplaceMode(params.get("mode"))
+                        ? List.copyOf(mappingColumns)
+                        : mappingColumns.stream().map(column -> column + "_mapped").toList()
+                );
+                specs.add(new OperationSpec("value_mapping", valueMappingParams, DEFAULT_CONDITION, stepIndex, execution));
                 continue;
             }
 
@@ -403,6 +435,9 @@ public class StagePlanner {
         if ("formatter".equals(spec.getType()) || "date_formatter".equals(spec.getType())) {
             return asStringList(spec.getParams().get("columns"));
         }
+        if ("constant".equals(spec.getType()) || "value_mapping".equals(spec.getType())) {
+            return asStringList(spec.getParams().get("columns"));
+        }
         return List.of();
     }
 
@@ -492,6 +527,12 @@ public class StagePlanner {
         if ("tag".equals(spec.getType())) {
             return appendColumn(currentColumns, String.valueOf(spec.getParams().get("tag_col_name")));
         }
+        if ("constant".equals(spec.getType())) {
+            return appendColumns(currentColumns, asStringList(spec.getParams().get("columns")));
+        }
+        if ("value_mapping".equals(spec.getType()) && !isReplaceMode(spec.getParams().get("mode"))) {
+            return appendColumns(currentColumns, asStringList(spec.getParams().get("result_columns")));
+        }
         if ("col_assign".equals(spec.getType())) {
             return appendColumn(currentColumns, String.valueOf(spec.getParams().get("col_name")));
         }
@@ -502,6 +543,16 @@ public class StagePlanner {
         List<String> nextColumns = new ArrayList<>(currentColumns);
         if (!nextColumns.contains(columnName)) {
             nextColumns.add(columnName);
+        }
+        return nextColumns;
+    }
+
+    private List<String> appendColumns(List<String> currentColumns, List<String> columnNames) {
+        List<String> nextColumns = new ArrayList<>(currentColumns);
+        for (String columnName : columnNames) {
+            if (!nextColumns.contains(columnName)) {
+                nextColumns.add(columnName);
+            }
         }
         return nextColumns;
     }
@@ -602,6 +653,36 @@ public class StagePlanner {
             return List.of();
         }
         return rawList.stream().map(value -> Boolean.valueOf(String.valueOf(value))).toList();
+    }
+
+    @SuppressWarnings("unchecked")
+    private LinkedHashMap<String, Object> asObjectMap(Object rawValue) {
+        if (!(rawValue instanceof Map<?, ?> rawMap)) {
+            return new LinkedHashMap<>();
+        }
+        LinkedHashMap<String, Object> values = new LinkedHashMap<>();
+        rawMap.forEach((key, value) -> values.put(String.valueOf(key), value));
+        return values;
+    }
+
+    @SuppressWarnings("unchecked")
+    private LinkedHashMap<String, Map<String, Object>> asNestedObjectMap(Object rawValue) {
+        if (!(rawValue instanceof Map<?, ?> rawMap)) {
+            return new LinkedHashMap<>();
+        }
+        LinkedHashMap<String, Map<String, Object>> values = new LinkedHashMap<>();
+        rawMap.forEach((key, value) -> {
+            LinkedHashMap<String, Object> nested = new LinkedHashMap<>();
+            if (value instanceof Map<?, ?> nestedMap) {
+                nestedMap.forEach((nestedKey, nestedValue) -> nested.put(String.valueOf(nestedKey), nestedValue));
+            }
+            values.put(String.valueOf(key), nested);
+        });
+        return values;
+    }
+
+    private boolean isReplaceMode(Object rawMode) {
+        return "replace".equals(String.valueOf(rawMode == null ? "replace" : rawMode));
     }
 
     public static class CandidateSegment {

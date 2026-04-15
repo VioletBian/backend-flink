@@ -18,6 +18,8 @@ public class PipelineContractNormalizer {
         "aggregate",
         "sort",
         "tag",
+        "constant",
+        "value_mapping",
         "col_assign",
         "col_apply",
         "series_transform",

@@ -86,6 +86,106 @@ class NativeStageExecutorTest {
     }
 
     @Test
+    void executesConstantOnColumnStageAndAppendsColumnsInSpecOrder() {
+        NativeStageExecutor executor = createExecutor();
+        OperationSpec constantSpec = new OperationSpec(
+            "constant",
+            Map.of(
+                "values", new LinkedHashMap<>(Map.of("Desk", "SH", "Region", "APAC")),
+                "columns", List.of("Desk", "Region")
+            ),
+            "index > -1",
+            0,
+            new ExecutionConfig(ExecutionConfig.COLUMNS, 2)
+        );
+
+        RuntimeTable resultTable = executor.execute(
+            buildSampleTable(),
+            new StagePlan(
+                0,
+                ExecutionConfig.COLUMNS,
+                List.of(0),
+                List.of("constant"),
+                List.of(constantSpec),
+                2,
+                true,
+                null
+            )
+        );
+
+        Assertions.assertEquals(List.of("Client Account", "Price", "Desk", "Region"), resultTable.getColumns());
+        Assertions.assertEquals("SH", resultTable.getRows().get(0).getValues().get("Desk"));
+        Assertions.assertEquals("APAC", resultTable.getRows().get(1).getValues().get("Region"));
+    }
+
+    @Test
+    void executesValueMappingInBothReplaceAndMapModes() {
+        NativeStageExecutor executor = createExecutor();
+        RuntimeTable source = new RuntimeTable(
+            List.of("Client Account", "Desk"),
+            List.of(
+                new RuntimeRow(0L, new LinkedHashMap<>(Map.of("Client Account", "7001", "Desk", "SH"))),
+                new RuntimeRow(1L, new LinkedHashMap<>(Map.of("Client Account", "7002", "Desk", "LDN")))
+            )
+        );
+
+        OperationSpec replaceSpec = new OperationSpec(
+            "value_mapping",
+            Map.of(
+                "mode", "replace",
+                "mappings", new LinkedHashMap<>(Map.of(
+                    "Desk", new LinkedHashMap<>(Map.of("SH", "Shanghai"))
+                )),
+                "default", "",
+                "columns", List.of("Desk"),
+                "result_columns", List.of("Desk")
+            ),
+            "index > -1",
+            0,
+            new ExecutionConfig(ExecutionConfig.SERIAL, null)
+        );
+        OperationSpec mapSpec = new OperationSpec(
+            "value_mapping",
+            Map.of(
+                "mode", "map",
+                "mappings", new LinkedHashMap<>(Map.of(
+                    "Client Account", new LinkedHashMap<>(Map.of("7001", "VIP")),
+                    "Desk", new LinkedHashMap<>(Map.of("SH", "CN"))
+                )),
+                "default", "NORMAL",
+                "columns", List.of("Client Account", "Desk"),
+                "result_columns", List.of("Client Account_mapped", "Desk_mapped")
+            ),
+            "index > -1",
+            1,
+            new ExecutionConfig(ExecutionConfig.COLUMNS, 2)
+        );
+
+        RuntimeTable replaced = executor.execute(source, buildStagePlan(List.of(replaceSpec), List.of("value_mapping")));
+        RuntimeTable mapped = executor.execute(
+            source,
+            new StagePlan(
+                0,
+                ExecutionConfig.COLUMNS,
+                List.of(1),
+                List.of("value_mapping"),
+                List.of(mapSpec),
+                2,
+                true,
+                null
+            )
+        );
+
+        Assertions.assertEquals("Shanghai", replaced.getRows().get(0).getValues().get("Desk"));
+        Assertions.assertEquals("LDN", replaced.getRows().get(1).getValues().get("Desk"));
+        Assertions.assertEquals(List.of("Client Account", "Desk", "Client Account_mapped", "Desk_mapped"), mapped.getColumns());
+        Assertions.assertEquals("VIP", mapped.getRows().get(0).getValues().get("Client Account_mapped"));
+        Assertions.assertEquals("NORMAL", mapped.getRows().get(1).getValues().get("Client Account_mapped"));
+        Assertions.assertEquals("CN", mapped.getRows().get(0).getValues().get("Desk_mapped"));
+        Assertions.assertEquals("NORMAL", mapped.getRows().get(1).getValues().get("Desk_mapped"));
+    }
+
+    @Test
     void executesStableSortWithoutResettingIndexIdentity() {
         NativeStageExecutor executor = createExecutor();
         RuntimeTable unsortedTable = new RuntimeTable(
