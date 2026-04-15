@@ -39,8 +39,7 @@ class HybridPipelineServiceTest {
         when(pipelineRunService.runPipeline(any(), anyString(), anyBoolean(), anyBoolean())).thenReturn(
             Map.of(
                 "columns", List.of("Client Account"),
-                "rows", List.of(),
-                "csv", "Client Account\n"
+                "data", List.of()
             )
         );
 

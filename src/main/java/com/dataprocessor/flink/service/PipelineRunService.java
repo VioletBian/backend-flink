@@ -182,6 +182,9 @@ public class PipelineRunService {
 
     // 中文说明：debug 优先保证与 Python backend 的外部契约一致，因此 step_snapshots 仍复用 Python prepared pipeline 跑一遍。
     private void enrichDebugPayload(Map<String, Object> response, byte[] fileBytes, PipelinePlan pipelinePlan) {
+        response.put("normalized_pipeline", pipelinePlan.getNormalizedPipeline());
+        response.put("prepared_pipeline", pipelinePlan.getPreparedPipeline());
+        response.put("execution_plan", pipelinePlan.toExecutionPlanPayload());
         try {
             Map<String, Object> pythonDebug = pythonFallbackBridge.run(
                 fileBytes,
@@ -189,9 +192,8 @@ public class PipelineRunService {
                 true
             );
             response.put("step_snapshots", pythonDebug.get("step_snapshots"));
-            response.put("normalized_pipeline", pipelinePlan.getNormalizedPipeline());
-            response.put("prepared_pipeline", pipelinePlan.getPreparedPipeline());
-            response.put("execution_plan", pipelinePlan.toExecutionPlanPayload());
+        } catch (IllegalStateException exception) {
+            response.put("debug_warning", "Unable to collect python parity step_snapshots: " + exception.getMessage());
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("Unable to serialize prepared pipeline JSON for debug mode.", exception);
         }

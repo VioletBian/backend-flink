@@ -1,6 +1,7 @@
 package com.dataprocessor.flink.service;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -59,10 +60,60 @@ class PipelineRunServiceTest {
         );
 
         Assertions.assertEquals(List.of("Client Account", "Price"), response.get("columns"));
+        Assertions.assertEquals(List.of(List.of("ABC", 12.3)), response.get("data"));
         Assertions.assertTrue(response.containsKey("prepared_pipeline"));
         Assertions.assertTrue(response.containsKey("execution_plan"));
         Assertions.assertTrue(response.containsKey("step_snapshots"));
         Assertions.assertFalse(response.containsKey("engine_debug"));
+        Assertions.assertFalse(response.containsKey("csv"));
+    }
+
+    @Test
+    void nativePipelineDebugDoesNotFailWhenPythonSnapshotsAreUnavailable() {
+        PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
+        when(pythonFallbackBridge.run(any(), anyString(), eq(true))).thenThrow(
+            new IllegalStateException("Python fallback bridge failed: python executable not found")
+        );
+
+        PipelineRunService pipelineRunService = new PipelineRunService(
+            new PipelineContractNormalizer(new ObjectMapper()),
+            new StagePlanner(new OperatorCapabilityRegistry(), new RowExpressionEvaluator()),
+            new NativeStageExecutor(Mockito.mock(BatchTableEnvironmentFactory.class), new RowExpressionEvaluator()),
+            pythonFallbackBridge,
+            new CsvRuntimeTableCodec(),
+            new ObjectMapper()
+        );
+
+        Map<String, Object> response = pipelineRunService.runPipeline(
+            "Client Account,Price\n7001,12\n7002,9\n".getBytes(StandardCharsets.UTF_8),
+            """
+                [
+                  {
+                    "type": "tag",
+                    "params": {
+                      "conditions": ["`Price` >= 10"],
+                      "tag_col_name": "Alert",
+                      "tags": ["HIGH"],
+                      "default_tag": "LOW"
+                    }
+                  }
+                ]
+                """,
+            false,
+            true
+        );
+
+        Assertions.assertEquals(List.of("Client Account", "Price", "Alert"), response.get("columns"));
+        Assertions.assertEquals(List.of(List.of(7001L, 12L, "HIGH"), List.of(7002L, 9L, "LOW")), response.get("data"));
+        Assertions.assertTrue(response.containsKey("normalized_pipeline"));
+        Assertions.assertTrue(response.containsKey("prepared_pipeline"));
+        Assertions.assertTrue(response.containsKey("execution_plan"));
+        Assertions.assertEquals(
+            "Unable to collect python parity step_snapshots: Python fallback bridge failed: python executable not found",
+            response.get("debug_warning")
+        );
+        Assertions.assertFalse(response.containsKey("step_snapshots"));
+        verify(pythonFallbackBridge, never()).run(any(), anyString(), eq(false));
     }
 
     @Test
@@ -98,6 +149,7 @@ class PipelineRunServiceTest {
         );
 
         Assertions.assertEquals(List.of("Client Account", "Price", "Alert"), response.get("columns"));
+        Assertions.assertEquals(List.of(List.of(7001L, 12L, "HIGH"), List.of(7002L, 9L, "LOW")), response.get("data"));
         verify(pythonFallbackBridge, never()).run(any(), anyString(), anyBoolean());
     }
 
@@ -145,7 +197,52 @@ class PipelineRunServiceTest {
         );
 
         Assertions.assertEquals(List.of("Client Account", "Desk", "Region", "Desk_mapped"), response.get("columns"));
+        Assertions.assertEquals(
+            List.of(List.of(7001L, "SH", "APAC", "CN"), List.of(7002L, "LDN", "APAC", "OTHER")),
+            response.get("data")
+        );
         verify(pythonFallbackBridge, never()).run(any(), anyString(), anyBoolean());
+    }
+
+    @Test
+    void fallbackStageReadsCompactPythonResponse() {
+        PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
+        when(pythonFallbackBridge.run(any(), anyString(), eq(false))).thenReturn(
+            Map.of(
+                "columns", List.of("A", "Shifted"),
+                "data", List.of(Arrays.asList(1L, null), List.of(2L, 1L))
+            )
+        );
+
+        PipelineRunService pipelineRunService = new PipelineRunService(
+            new PipelineContractNormalizer(new ObjectMapper()),
+            new StagePlanner(new OperatorCapabilityRegistry(), new RowExpressionEvaluator()),
+            new NativeStageExecutor(Mockito.mock(BatchTableEnvironmentFactory.class), new RowExpressionEvaluator()),
+            pythonFallbackBridge,
+            new CsvRuntimeTableCodec(),
+            new ObjectMapper()
+        );
+
+        Map<String, Object> response = pipelineRunService.runPipeline(
+            "A\n1\n2\n".getBytes(StandardCharsets.UTF_8),
+            """
+                [
+                  {
+                    "type": "series_transform",
+                    "params": {
+                      "on": ["A"],
+                      "transform_expr": "lambda x: x.shift(1)",
+                      "rename": ["Shifted"]
+                    }
+                  }
+                ]
+                """,
+            false,
+            false
+        );
+
+        Assertions.assertEquals(List.of("A", "Shifted"), response.get("columns"));
+        Assertions.assertEquals(List.of(Arrays.asList(1L, null), List.of(2L, 1L)), response.get("data"));
     }
 
     @Test
