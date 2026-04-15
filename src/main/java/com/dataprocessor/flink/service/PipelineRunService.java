@@ -18,11 +18,14 @@ import com.dataprocessor.flink.runtime.CsvRuntimeTableCodec;
 import com.dataprocessor.flink.runtime.RuntimeTable;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 @Service
 public class PipelineRunService {
 
+    private static final Logger log = LoggerFactory.getLogger(PipelineRunService.class);
     private static final String PYTHON_FALLBACK_FAILURE_PREFIX = "Python fallback bridge failed:";
     private static final Pattern PYTHON_STEP_FAILURE_PATTERN = Pattern.compile(
         "^Step\\s+(\\d+)\\s+\\(([^)]+)\\)\\s+failed:\\s*(.*)$",
@@ -54,12 +57,24 @@ public class PipelineRunService {
 
     // 中文说明：这里是 Java /run 的唯一运行链，统一负责 execution enrich、segment 规划、native/fallback 执行和 debug 回填。
     public Map<String, Object> runPipeline(byte[] fileBytes, String pipelineJson, boolean enableParallel, boolean debug) {
+        long runStartedAt = System.nanoTime();
         List<Map<String, Object>> normalizedPipeline = pipelineContractNormalizer.normalizeJson(pipelineJson);
         String defaultExecutionStrategy = enableParallel ? ExecutionConfig.AUTO : ExecutionConfig.SERIAL;
         List<Map<String, Object>> preparedPipeline = stagePlanner.materializeRunSteps(normalizedPipeline, defaultExecutionStrategy);
         List<OperationSpec> specs = stagePlanner.parsePipelineSpecs(preparedPipeline, defaultExecutionStrategy);
 
         RuntimeTable runtimeTable = csvRuntimeTableCodec.read(fileBytes);
+        log.info(
+            "Pipeline run started. inputBytes={}, normalizedSteps={}, preparedSteps={}, parsedSpecs={}, inputRows={}, inputColumns={}, enableParallel={}, debug={}",
+            fileBytes.length,
+            normalizedPipeline.size(),
+            preparedPipeline.size(),
+            specs.size(),
+            runtimeTable.getRowCount(),
+            runtimeTable.getColumnCount(),
+            enableParallel,
+            debug
+        );
         List<StagePlan> stages = new ArrayList<>();
         int pointer = 0;
         int stageIndex = 0;
@@ -68,7 +83,28 @@ public class PipelineRunService {
             StagePlanner.CandidateSegment candidateSegment = stagePlanner.collectCandidateSegment(specs, pointer);
             StagePlan stagePlan = stagePlanner.chooseStage(runtimeTable, candidateSegment, stageIndex++);
             stagePlanner.applyStageExecution(preparedPipeline, stagePlan);
+            long stageStartedAt = System.nanoTime();
+            // 中文说明：stage 级日志把执行器类型、策略、输入规模和 fallback 原因打出来，便于快速定位大表到底卡在哪一段。
+            log.info(
+                "Stage {} started. executor={}, strategy={}, workers={}, logicalSteps={}, operationTypes={}, inputRows={}, inputColumns={}, fallbackReason={}",
+                stagePlan.getStageIndex(),
+                stagePlan.getExecutorKind(),
+                stagePlan.getStrategy(),
+                stagePlan.getMaxWorkers(),
+                stagePlan.getLogicalStepIndexes(),
+                stagePlan.getOperationTypes(),
+                runtimeTable.getRowCount(),
+                runtimeTable.getColumnCount(),
+                stagePlan.getFallbackReason()
+            );
             runtimeTable = executeStage(runtimeTable, stagePlan, preparedPipeline);
+            log.info(
+                "Stage {} finished in {} ms. outputRows={}, outputColumns={}",
+                stagePlan.getStageIndex(),
+                elapsedMillis(stageStartedAt),
+                runtimeTable.getRowCount(),
+                runtimeTable.getColumnCount()
+            );
             stages.add(stagePlan);
             pointer = candidateSegment.getNextIndex();
         }
@@ -78,6 +114,14 @@ public class PipelineRunService {
         if (debug) {
             enrichDebugPayload(response, fileBytes, pipelinePlan);
         }
+        log.info(
+            "Pipeline run finished in {} ms. stages={}, outputRows={}, outputColumns={}, debug={}",
+            elapsedMillis(runStartedAt),
+            stages.size(),
+            runtimeTable.getRowCount(),
+            runtimeTable.getColumnCount(),
+            debug
+        );
         return response;
     }
 
@@ -87,8 +131,14 @@ public class PipelineRunService {
         List<Map<String, Object>> preparedPipeline
     ) {
         if (nativeStageExecutor.supports(stagePlan)) {
+            log.info("Stage {} executing with Flink native executor.", stagePlan.getStageIndex());
             return nativeStageExecutor.execute(runtimeTable, stagePlan);
         }
+        log.info(
+            "Stage {} executing with Python fallback. fallbackReason={}",
+            stagePlan.getStageIndex(),
+            stagePlan.getFallbackReason()
+        );
         List<Map<String, Object>> stagePipeline = new ArrayList<>();
         for (int stepIndex : stagePlan.getLogicalStepIndexes()) {
             stagePipeline.add(new LinkedHashMap<>(preparedPipeline.get(stepIndex)));
@@ -176,5 +226,9 @@ public class PipelineRunService {
         }
 
         return new PipelineStepExecutionException(resolvedStepIndex, resolvedOperatorType, detail, exception);
+    }
+
+    private long elapsedMillis(long startedAtNanos) {
+        return (System.nanoTime() - startedAtNanos) / 1_000_000L;
     }
 }

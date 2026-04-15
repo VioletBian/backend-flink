@@ -7,6 +7,8 @@ import com.dataprocessor.flink.model.PipelineSaveRequest;
 import com.dataprocessor.flink.service.HybridPipelineService;
 import com.dataprocessor.flink.service.PipelineStoreService;
 import jakarta.validation.Valid;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,6 +22,8 @@ import org.springframework.web.multipart.MultipartFile;
 @RestController
 @RequestMapping("/dp/pipeline")
 public class PipelineController {
+
+    private static final Logger log = LoggerFactory.getLogger(PipelineController.class);
 
     private final HybridPipelineService hybridPipelineService;
     private final PipelineStoreService pipelineStoreService;
@@ -58,6 +62,15 @@ public class PipelineController {
         @RequestParam(name = "enableParallel", defaultValue = "false") boolean enableParallel,
         @RequestParam(name = "debug", defaultValue = "false") boolean debug
     ) {
+        // 中文说明：这里优先记录请求是否真正进入了应用层，以及输入体量和运行开关，方便区分“没进服务”和“进服务后执行失败”。
+        log.info(
+            "Received pipeline run request. fileName={}, fileSizeBytes={}, pipelineJsonChars={}, enableParallel={}, debug={}",
+            file.getOriginalFilename(),
+            file.getSize(),
+            pipelineJson == null ? 0 : pipelineJson.length(),
+            enableParallel,
+            debug
+        );
         return hybridPipelineService.runPipeline(file, pipelineJson, enableParallel, debug);
     }
 }

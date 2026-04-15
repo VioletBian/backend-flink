@@ -1,10 +1,26 @@
 server:
   port: 8004
+  tomcat:
+    basedir: .
+    accesslog:
+      enabled: true
+      directory: logs
+      prefix: access
+      suffix: .log
+      pattern: '%t %a "%r" %s %b %D'
 
 spring:
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
   data:
     mongodb:
       uri: mongodb://localhost:27017/pipeline_db
+
+logging:
+  level:
+    com.dataprocessor.flink: INFO
 
 backend:
   flink:
