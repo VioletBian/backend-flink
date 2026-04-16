@@ -54,7 +54,7 @@ public class RowExpressionEvaluator {
 
     public CompiledBooleanExpression compileBooleanExpression(String expression, List<String> availableColumns) {
         if (expression == null || expression.isBlank() || DEFAULT_CONDITION.equals(expression.trim())) {
-            return CompiledBooleanExpression.alwaysTrue();
+            return CompiledBooleanExpression.ofAlwaysTrue();
         }
         ExpressionBinding binding = compileInternal(expression, availableColumns);
         return new CompiledBooleanExpression(binding.spelExpression(), binding.variableMapping(), false);
@@ -250,7 +250,7 @@ public class RowExpressionEvaluator {
         LinkedHashMap<String, String> variableMapping,
         boolean alwaysTrue
     ) implements Serializable {
-        public static CompiledBooleanExpression alwaysTrue() {
+        public static CompiledBooleanExpression ofAlwaysTrue() {
             return new CompiledBooleanExpression("true", new LinkedHashMap<>(), true);
         }
     }

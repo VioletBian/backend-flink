@@ -83,7 +83,9 @@ public class NativeStageExecutor {
         StreamExecutionEnvironment env = batchTableEnvironmentFactory.createBatchStreamExecutionEnvironment(stagePlan.getMaxWorkers());
         env.setRuntimeMode(RuntimeExecutionMode.BATCH);
 
-        DataStream<RuntimeRow> stream = env.fromCollection(inputTable.getRows()).setParallelism(stagePlan.getMaxWorkers());
+        // 中文说明：Flink collection source 本身是 non-parallel source，parallelism 只能是 1。
+        // 这里先单并发喂入，再通过 rebalance 把数据打散给后续真正的并行 row-local 算子。
+        DataStream<RuntimeRow> stream = env.fromCollection(inputTable.getRows()).rebalance();
         for (OperationSpec spec : stagePlan.getSpecs()) {
             try {
                 validateRequiredInputColumns(currentColumns, spec);
@@ -413,7 +415,7 @@ public class NativeStageExecutor {
         }
 
         if (!missingColumns.isEmpty()) {
-            throw new PipelineStepExecutionException(spec, buildMissingColumnsDetail(missingColumns));
+            throw new PipelineStepExecutionException(spec, buildMissingColumnsDetail(new ArrayList<>(missingColumns)));
         }
     }
 
