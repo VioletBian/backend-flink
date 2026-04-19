@@ -16,6 +16,8 @@
   - `filter`（简单条件表达式）
   - `rename`
   - `tag`（简单条件表达式，first-match）
+  - `constant`（支持 `rows + columns`）
+  - `value_mapping`（支持 `replace/map`，支持 `rows + columns`）
   - `col_assign`（仅 `method=vectorized` 且表达式可静态解析）
   - `sort`
   - `aggregate`（`mean/count/sum/max/min/std`）
@@ -31,28 +33,7 @@
 
 - 端口：`8004`
 - Python bridge command：`python3 backend/scripts/reference_runner_cli.py`
-- 如需切到虚拟环境，可优先把 `backend.flink.python-command` 直接改成 venv 里的 `python.exe` / `bin/python`
-- 如果远端环境必须先执行激活脚本，再允许使用 `python` 命令，可额外配置 `backend.flink.python-activation-script`
 - 开发态 CORS 默认放开 `localhost/127.0.0.1` 的各端口，可在 `backend.flink.cors.allowed-origin-patterns` 调整
-
-Windows 远端环境示例：
-
-```yaml
-backend:
-  flink:
-    python-command: python
-    python-activation-script: D:/runtime/venv312/Scripts/activate.bat
-    python-runner-path: backend/scripts/reference_runner_cli.py
-    python-working-directory: .
-```
-
-如果能直接定位到虚拟环境解释器，推荐更简单的配置：
-
-```yaml
-backend:
-  flink:
-    python-command: D:/runtime/venv312/Scripts/python.exe
-```
 
 ## 构建
 

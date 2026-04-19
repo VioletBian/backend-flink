@@ -94,7 +94,7 @@ public class NativeStageExecutor {
                     RowExpressionEvaluator.CompiledBooleanExpression compiledExpression =
                         rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), availableColumns);
                     List<String> projectedColumns = projectedColumns(currentColumns, spec);
-                    stream = stream.filter(row -> rowExpressionEvaluator.evaluateBoolean(row, compiledExpression))
+                    stream = stream.filter(row -> RowExpressionEvaluator.evaluateBooleanExpression(row, compiledExpression))
                         .setParallelism(stagePlan.getMaxWorkers());
                     if (!projectedColumns.isEmpty()) {
                         stream = stream.map(row -> projectRow(row, projectedColumns)).setParallelism(stagePlan.getMaxWorkers());
@@ -111,11 +111,11 @@ public class NativeStageExecutor {
                 }
                 if ("tag".equals(spec.getType())) {
                     List<String> availableColumns = new ArrayList<>(currentColumns);
-                    List<RowExpressionEvaluator.CompiledBooleanExpression> compiledConditions = compileConditions(
+                    List<RowExpressionEvaluator.CompiledBooleanExpression> compiledConditions = new ArrayList<>(compileConditions(
                         asStringList(spec.getParams().get("conditions")),
                         availableColumns
-                    );
-                    List<String> tags = asStringList(spec.getParams().get("tags"));
+                    ));
+                    List<String> tags = new ArrayList<>(asStringList(spec.getParams().get("tags")));
                     String tagColumn = String.valueOf(spec.getParams().get("tag_col_name"));
                     Object defaultTag = spec.getParams().get("default_tag");
                     stream = stream.map(
@@ -125,13 +125,20 @@ public class NativeStageExecutor {
                     continue;
                 }
                 if ("constant".equals(spec.getType())) {
-                    stream = stream.map(row -> applyConstant(row, spec)).setParallelism(stagePlan.getMaxWorkers());
-                    currentColumns = appendColumns(currentColumns, asStringList(spec.getParams().get("columns")));
+                    LinkedHashMap<String, Object> constantValues = asObjectMap(spec.getParams().get("values"));
+                    stream = stream.map(row -> applyConstant(row, constantValues)).setParallelism(stagePlan.getMaxWorkers());
+                    currentColumns = appendColumns(currentColumns, new ArrayList<>(constantValues.keySet()));
                     continue;
                 }
                 if ("value_mapping".equals(spec.getType())) {
-                    stream = stream.map(row -> applyValueMapping(row, spec)).setParallelism(stagePlan.getMaxWorkers());
-                    if (!isReplaceMode(spec.getParams().get("mode"))) {
+                    List<String> mappingColumns = new ArrayList<>(asStringList(spec.getParams().get("columns")));
+                    LinkedHashMap<String, Map<String, Object>> mappings = asNestedObjectMap(spec.getParams().get("mappings"));
+                    Object defaultValue = spec.getParams().get("default");
+                    boolean replaceMode = isReplaceMode(spec.getParams().get("mode"));
+                    stream = stream.map(
+                        row -> applyValueMapping(row, mappingColumns, mappings, defaultValue, replaceMode)
+                    ).setParallelism(stagePlan.getMaxWorkers());
+                    if (!replaceMode) {
                         currentColumns = appendColumns(currentColumns, asStringList(spec.getParams().get("result_columns")));
                     }
                     continue;
@@ -150,11 +157,17 @@ public class NativeStageExecutor {
                     continue;
                 }
                 if ("formatter".equals(spec.getType())) {
-                    stream = stream.map(row -> applyFormatter(row, spec)).setParallelism(stagePlan.getMaxWorkers());
+                    List<String> formatterColumns = new ArrayList<>(asStringList(spec.getParams().get("columns")));
+                    String method = String.valueOf(spec.getParams().get("method"));
+                    String valueExpr = String.valueOf(spec.getParams().getOrDefault("value_expr", ""));
+                    stream = stream.map(row -> applyFormatter(row, formatterColumns, method, valueExpr)).setParallelism(stagePlan.getMaxWorkers());
                     continue;
                 }
                 if ("date_formatter".equals(spec.getType())) {
-                    stream = stream.map(row -> applyDateFormatter(row, spec)).setParallelism(stagePlan.getMaxWorkers());
+                    List<String> dateColumns = new ArrayList<>(asStringList(spec.getParams().get("columns")));
+                    LinkedHashMap<String, Object> formatterParams = new LinkedHashMap<>(spec.getParams());
+                    formatterParams.put("columns", dateColumns);
+                    stream = stream.map(row -> applyDateFormatter(row, dateColumns, formatterParams)).setParallelism(stagePlan.getMaxWorkers());
                     continue;
                 }
                 throw new IllegalStateException("Unsupported native row stage operator: " + spec.getType());
@@ -289,13 +302,20 @@ public class NativeStageExecutor {
     }
 
     private RuntimeTable applyConstant(RuntimeTable inputTable, OperationSpec spec) {
-        List<RuntimeRow> resultRows = inputTable.getRows().stream().map(row -> applyConstant(row, spec)).toList();
+        LinkedHashMap<String, Object> constantValues = asObjectMap(spec.getParams().get("values"));
+        List<RuntimeRow> resultRows = inputTable.getRows().stream().map(row -> applyConstant(row, constantValues)).toList();
         return new RuntimeTable(appendColumns(inputTable.getColumns(), asStringList(spec.getParams().get("columns"))), resultRows);
     }
 
     private RuntimeTable applyValueMapping(RuntimeTable inputTable, OperationSpec spec) {
-        List<RuntimeRow> resultRows = inputTable.getRows().stream().map(row -> applyValueMapping(row, spec)).toList();
-        List<String> resultColumns = isReplaceMode(spec.getParams().get("mode"))
+        List<String> mappingColumns = new ArrayList<>(asStringList(spec.getParams().get("columns")));
+        LinkedHashMap<String, Map<String, Object>> mappings = asNestedObjectMap(spec.getParams().get("mappings"));
+        Object defaultValue = spec.getParams().get("default");
+        boolean replaceMode = isReplaceMode(spec.getParams().get("mode"));
+        List<RuntimeRow> resultRows = inputTable.getRows().stream()
+            .map(row -> applyValueMapping(row, mappingColumns, mappings, defaultValue, replaceMode))
+            .toList();
+        List<String> resultColumns = replaceMode
             ? inputTable.getColumns()
             : appendColumns(inputTable.getColumns(), asStringList(spec.getParams().get("result_columns")));
         return new RuntimeTable(resultColumns, resultRows);
@@ -391,12 +411,22 @@ public class NativeStageExecutor {
     }
 
     private RuntimeTable applyFormatter(RuntimeTable inputTable, OperationSpec spec) {
-        List<RuntimeRow> transformedRows = inputTable.getRows().stream().map(row -> applyFormatter(row, spec)).toList();
+        List<String> columns = new ArrayList<>(asStringList(spec.getParams().get("columns")));
+        String method = String.valueOf(spec.getParams().get("method"));
+        String valueExpr = String.valueOf(spec.getParams().getOrDefault("value_expr", ""));
+        List<RuntimeRow> transformedRows = inputTable.getRows().stream()
+            .map(row -> applyFormatter(row, columns, method, valueExpr))
+            .toList();
         return new RuntimeTable(inputTable.getColumns(), transformedRows);
     }
 
     private RuntimeTable applyDateFormatter(RuntimeTable inputTable, OperationSpec spec) {
-        List<RuntimeRow> transformedRows = inputTable.getRows().stream().map(row -> applyDateFormatter(row, spec)).toList();
+        List<String> columns = new ArrayList<>(asStringList(spec.getParams().get("columns")));
+        LinkedHashMap<String, Object> params = new LinkedHashMap<>(spec.getParams());
+        params.put("columns", columns);
+        List<RuntimeRow> transformedRows = inputTable.getRows().stream()
+            .map(row -> applyDateFormatter(row, columns, params))
+            .toList();
         return new RuntimeTable(inputTable.getColumns(), transformedRows);
     }
 
@@ -564,7 +594,7 @@ public class NativeStageExecutor {
             .toList();
     }
 
-    private RuntimeRow applyTag(
+    private static RuntimeRow applyTag(
         RuntimeRow row,
         String tagColumn,
         List<RowExpressionEvaluator.CompiledBooleanExpression> compiledConditions,
@@ -573,7 +603,7 @@ public class NativeStageExecutor {
     ) {
         Object resolvedTag = defaultTag;
         for (int index = 0; index < compiledConditions.size(); index++) {
-            if (rowExpressionEvaluator.evaluateBoolean(row, compiledConditions.get(index))) {
+            if (RowExpressionEvaluator.evaluateBooleanExpression(row, compiledConditions.get(index))) {
                 resolvedTag = tags.get(index);
                 break;
             }
@@ -583,19 +613,21 @@ public class NativeStageExecutor {
         return new RuntimeRow(row.getRowId(), values);
     }
 
-    private RuntimeRow applyConstant(RuntimeRow row, OperationSpec spec) {
+    private static RuntimeRow applyConstant(RuntimeRow row, Map<String, Object> constantValues) {
         LinkedHashMap<String, Object> values = row.getValues();
-        asObjectMap(spec.getParams().get("values")).forEach(values::put);
+        constantValues.forEach(values::put);
         return new RuntimeRow(row.getRowId(), values);
     }
 
-    private RuntimeRow applyValueMapping(RuntimeRow row, OperationSpec spec) {
+    private static RuntimeRow applyValueMapping(
+        RuntimeRow row,
+        List<String> mappingColumns,
+        Map<String, Map<String, Object>> mappings,
+        Object defaultValue,
+        boolean replaceMode
+    ) {
         LinkedHashMap<String, Object> values = row.getValues();
-        LinkedHashMap<String, Map<String, Object>> mappings = asNestedObjectMap(spec.getParams().get("mappings"));
-        Object defaultValue = spec.getParams().get("default");
-        boolean replaceMode = isReplaceMode(spec.getParams().get("mode"));
-
-        for (String columnName : asStringList(spec.getParams().get("columns"))) {
+        for (String columnName : mappingColumns) {
             if (!values.containsKey(columnName)) {
                 continue;
             }
@@ -618,15 +650,15 @@ public class NativeStageExecutor {
         return new RuntimeRow(row.getRowId(), values);
     }
 
-    private RuntimeRow applyVectorizedColAssign(
+    private static RuntimeRow applyVectorizedColAssign(
         RuntimeRow row,
         String columnName,
         RowExpressionEvaluator.CompiledBooleanExpression compiledCondition,
         RowExpressionEvaluator.CompiledValueExpression compiledValue
     ) {
         LinkedHashMap<String, Object> values = row.getValues();
-        Object assignedValue = rowExpressionEvaluator.evaluateBoolean(row, compiledCondition)
-            ? rowExpressionEvaluator.evaluateValue(row, compiledValue)
+        Object assignedValue = RowExpressionEvaluator.evaluateBooleanExpression(row, compiledCondition)
+            ? RowExpressionEvaluator.evaluateValueExpression(row, compiledValue)
             : null;
         values.put(columnName, assignedValue);
         return new RuntimeRow(row.getRowId(), values);
@@ -702,20 +734,18 @@ public class NativeStageExecutor {
         return previewColumns;
     }
 
-    private static RuntimeRow applyFormatter(RuntimeRow row, OperationSpec spec) {
+    private static RuntimeRow applyFormatter(RuntimeRow row, List<String> columns, String method, String valueExpr) {
         LinkedHashMap<String, Object> values = row.getValues();
-        String method = String.valueOf(spec.getParams().get("method"));
-        String valueExpr = String.valueOf(spec.getParams().getOrDefault("value_expr", ""));
-        for (String column : asStringList(spec.getParams().get("columns"))) {
+        for (String column : columns) {
             values.put(column, transformFormatterValue(values.get(column), method, valueExpr));
         }
         return new RuntimeRow(row.getRowId(), values);
     }
 
-    private static RuntimeRow applyDateFormatter(RuntimeRow row, OperationSpec spec) {
+    private static RuntimeRow applyDateFormatter(RuntimeRow row, List<String> columns, Map<String, Object> params) {
         LinkedHashMap<String, Object> values = row.getValues();
-        for (String column : asStringList(spec.getParams().get("columns"))) {
-            values.put(column, transformDateValue(values.get(column), spec.getParams()));
+        for (String column : columns) {
+            values.put(column, transformDateValue(values.get(column), params));
         }
         return new RuntimeRow(row.getRowId(), values);
     }

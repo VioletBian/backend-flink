@@ -229,6 +229,69 @@ class NativeStageExecutorTest {
     }
 
     @Test
+    void executesRowsStageWithoutNonParallelSourceFailure() {
+        NativeStageExecutor executor = new NativeStageExecutor(new BatchTableEnvironmentFactory(), new RowExpressionEvaluator());
+        OperationSpec formatterSpec = new OperationSpec(
+            "formatter",
+            Map.of(
+                "method", "StringPrefix",
+                "columns", List.of("Client Account"),
+                "value_expr", "acct_"
+            ),
+            "index > -1",
+            0,
+            new ExecutionConfig(ExecutionConfig.ROWS, 2)
+        );
+
+        RuntimeTable resultTable = executor.execute(
+            buildSampleTable(),
+            new StagePlan(
+                0,
+                ExecutionConfig.ROWS,
+                List.of(0),
+                List.of("formatter"),
+                List.of(formatterSpec),
+                2,
+                true,
+                null
+            )
+        );
+
+        Assertions.assertEquals("acct_7001", resultTable.getRows().get(0).getValues().get("Client Account"));
+        Assertions.assertEquals("acct_7002", resultTable.getRows().get(1).getValues().get("Client Account"));
+    }
+
+    @Test
+    void executesRowsFilterStageWithoutSerializableClosureFailure() {
+        NativeStageExecutor executor = new NativeStageExecutor(new BatchTableEnvironmentFactory(), new RowExpressionEvaluator());
+        OperationSpec filterSpec = new OperationSpec(
+            "filter",
+            Map.of("requiredCols", List.of("Client Account", "Price")),
+            "`Price` > 10",
+            0,
+            new ExecutionConfig(ExecutionConfig.ROWS, 2)
+        );
+
+        RuntimeTable resultTable = executor.execute(
+            buildSampleTable(),
+            new StagePlan(
+                0,
+                ExecutionConfig.ROWS,
+                List.of(0),
+                List.of("filter"),
+                List.of(filterSpec),
+                2,
+                true,
+                null
+            )
+        );
+
+        Assertions.assertEquals(List.of("Client Account", "Price"), resultTable.getColumns());
+        Assertions.assertEquals(1, resultTable.getRows().size());
+        Assertions.assertEquals("7001", resultTable.getRows().get(0).getValues().get("Client Account"));
+    }
+
+    @Test
     void executesAggregateWithRenameAndResetsIndex() {
         NativeStageExecutor executor = createExecutor();
         RuntimeTable aggregateSource = new RuntimeTable(
