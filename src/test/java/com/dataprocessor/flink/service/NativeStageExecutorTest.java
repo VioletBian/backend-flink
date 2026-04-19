@@ -321,6 +321,38 @@ class NativeStageExecutorTest {
         Assertions.assertEquals(7L, resultTable.getRows().get(1).getValues().get("Total Price"));
     }
 
+    @Test
+    void executesAggregateCountOnGroupedQuantityColumn() {
+        NativeStageExecutor executor = createExecutor();
+        RuntimeTable aggregateSource = new RuntimeTable(
+            List.of("Client Account", "Contract", "Quantity"),
+            List.of(
+                new RuntimeRow(10L, new LinkedHashMap<>(Map.of("Client Account", "A", "Contract", "C1", "Quantity", 10L))),
+                new RuntimeRow(20L, new LinkedHashMap<>(Map.of("Client Account", "A", "Contract", "C1", "Quantity", 20L))),
+                new RuntimeRow(30L, new LinkedHashMap<>(Map.of("Client Account", "A", "Contract", "C2", "Quantity", 30L))),
+                new RuntimeRow(40L, new LinkedHashMap<>(Map.of("Client Account", "B", "Contract", "C1", "Quantity", 40L)))
+            )
+        );
+        OperationSpec aggregateSpec = new OperationSpec(
+            "aggregate",
+            Map.of(
+                "by", List.of("Client Account", "Contract"),
+                "actions", Map.of("method", "count", "on", List.of("Quantity"))
+            ),
+            "index > -1",
+            0,
+            new ExecutionConfig(ExecutionConfig.SERIAL, null)
+        );
+
+        RuntimeTable resultTable = executor.execute(aggregateSource, buildStagePlan(List.of(aggregateSpec), List.of("aggregate")));
+
+        Assertions.assertEquals(List.of("Client Account", "Contract", "Quantity"), resultTable.getColumns());
+        Assertions.assertEquals(List.of(0L, 1L, 2L), resultTable.getRows().stream().map(RuntimeRow::getRowId).toList());
+        Assertions.assertEquals(2L, resultTable.getRows().get(0).getValues().get("Quantity"));
+        Assertions.assertEquals(1L, resultTable.getRows().get(1).getValues().get("Quantity"));
+        Assertions.assertEquals(1L, resultTable.getRows().get(2).getValues().get("Quantity"));
+    }
+
     private NativeStageExecutor createExecutor() {
         return new NativeStageExecutor(
             Mockito.mock(BatchTableEnvironmentFactory.class),

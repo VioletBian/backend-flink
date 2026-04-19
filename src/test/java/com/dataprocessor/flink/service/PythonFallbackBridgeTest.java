@@ -32,7 +32,7 @@ class PythonFallbackBridgeTest {
         Assertions.assertEquals(
             List.of(
                 "python3",
-                Path.of("").toAbsolutePath().normalize().resolve("backend/scripts/reference_runner_cli.py").toString(),
+                Path.of("").toAbsolutePath().normalize().getParent().resolve("backend/scripts/reference_runner_cli.py").toString(),
                 "--input-file",
                 "/tmp/input.csv",
                 "--pipeline-file",

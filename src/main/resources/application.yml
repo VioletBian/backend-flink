@@ -21,6 +21,8 @@ spring:
 logging:
   level:
     com.dataprocessor.flink: INFO
+    org.apache.flink: WARN
+    org.apache.flink.streaming.api.operators.collect.CollectResultFetcher: ERROR
 
 backend:
   flink:

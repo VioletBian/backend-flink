@@ -27,7 +27,6 @@ import com.dataprocessor.flink.planner.StagePlan;
 import com.dataprocessor.flink.runtime.RowExpressionEvaluator;
 import com.dataprocessor.flink.runtime.RuntimeRow;
 import com.dataprocessor.flink.runtime.RuntimeTable;
-import com.dataprocessor.flink.runtime.RuntimeRowWireCodec;
 import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -85,11 +84,11 @@ public class NativeStageExecutor {
         env.setRuntimeMode(RuntimeExecutionMode.BATCH);
         List<RuntimeRow> sourceRows = new ArrayList<>(inputTable.getRows());
 
-        // 中文说明：这里改用 bounded sequence source 生成行索引，再在单并发 map 中取出 payload。
-        // 这样既保留 batch mode，又避免 SourceFunction 被 Flink 识别成 unbounded source。
-        DataStream<String> stream = env.fromSequence(0L, sourceRows.size() - 1L)
+        // 中文说明：现在 rows 路径直接在 Flink 流中传 RuntimeRow。
+        // 前面导致 GenericType/Kryo 出错的集合与闭包问题已经收敛掉，这样能去掉每个算子上的 JSON 编解码开销。
+        DataStream<RuntimeRow> stream = env.fromSequence(0L, sourceRows.size() - 1L)
             .setParallelism(1)
-            .map(index -> RuntimeRowWireCodec.encode(sourceRows.get(Math.toIntExact(index))))
+            .map(index -> sourceRows.get(Math.toIntExact(index)).copy())
             .setParallelism(1)
             .rebalance();
         for (OperationSpec spec : stagePlan.getSpecs()) {
@@ -100,10 +99,10 @@ public class NativeStageExecutor {
                     RowExpressionEvaluator.CompiledBooleanExpression compiledExpression =
                         rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), availableColumns);
                     List<String> projectedColumns = projectedColumns(currentColumns, spec);
-                    stream = stream.filter(payload -> matchesFilterPayload(payload, compiledExpression))
+                    stream = stream.filter(row -> RowExpressionEvaluator.evaluateBooleanExpression(row, compiledExpression))
                         .setParallelism(stagePlan.getMaxWorkers());
                     if (!projectedColumns.isEmpty()) {
-                        stream = stream.map(payload -> projectPayload(payload, projectedColumns)).setParallelism(stagePlan.getMaxWorkers());
+                        stream = stream.map(row -> projectRow(row, projectedColumns)).setParallelism(stagePlan.getMaxWorkers());
                         currentColumns = projectedColumns;
                     }
                     continue;
@@ -111,7 +110,7 @@ public class NativeStageExecutor {
                 if ("rename".equals(spec.getType())) {
                     List<String> beforeColumns = new ArrayList<>(currentColumns);
                     Map<String, String> renameMap = asStringMap(spec.getParams().get("map"));
-                    stream = stream.map(payload -> renamePayload(payload, beforeColumns, renameMap)).setParallelism(stagePlan.getMaxWorkers());
+                    stream = stream.map(row -> renameRow(row, beforeColumns, renameMap)).setParallelism(stagePlan.getMaxWorkers());
                     currentColumns = renameColumns(currentColumns, renameMap);
                     continue;
                 }
@@ -125,14 +124,14 @@ public class NativeStageExecutor {
                     String tagColumn = String.valueOf(spec.getParams().get("tag_col_name"));
                     Object defaultTag = spec.getParams().get("default_tag");
                     stream = stream.map(
-                        payload -> tagPayload(payload, tagColumn, compiledConditions, tags, defaultTag)
+                        row -> applyTag(row, tagColumn, compiledConditions, tags, defaultTag)
                     ).setParallelism(stagePlan.getMaxWorkers());
                     currentColumns = appendColumn(currentColumns, tagColumn);
                     continue;
                 }
                 if ("constant".equals(spec.getType())) {
                     LinkedHashMap<String, Object> constantValues = asObjectMap(spec.getParams().get("values"));
-                    stream = stream.map(payload -> constantPayload(payload, constantValues)).setParallelism(stagePlan.getMaxWorkers());
+                    stream = stream.map(row -> applyConstant(row, constantValues)).setParallelism(stagePlan.getMaxWorkers());
                     currentColumns = appendColumns(currentColumns, new ArrayList<>(constantValues.keySet()));
                     continue;
                 }
@@ -142,7 +141,7 @@ public class NativeStageExecutor {
                     Object defaultValue = spec.getParams().get("default");
                     boolean replaceMode = isReplaceMode(spec.getParams().get("mode"));
                     stream = stream.map(
-                        payload -> valueMappingPayload(payload, mappingColumns, mappings, defaultValue, replaceMode)
+                        row -> applyValueMapping(row, mappingColumns, mappings, defaultValue, replaceMode)
                     ).setParallelism(stagePlan.getMaxWorkers());
                     if (!replaceMode) {
                         currentColumns = appendColumns(currentColumns, asStringList(spec.getParams().get("result_columns")));
@@ -157,7 +156,7 @@ public class NativeStageExecutor {
                         rowExpressionEvaluator.compileValueExpression(String.valueOf(spec.getParams().get("value_expr")), availableColumns);
                     String columnName = String.valueOf(spec.getParams().get("col_name"));
                     stream = stream.map(
-                        payload -> vectorizedColAssignPayload(payload, columnName, compiledCondition, compiledValue)
+                        row -> applyVectorizedColAssign(row, columnName, compiledCondition, compiledValue)
                     ).setParallelism(stagePlan.getMaxWorkers());
                     currentColumns = appendColumn(currentColumns, columnName);
                     continue;
@@ -166,7 +165,7 @@ public class NativeStageExecutor {
                     List<String> formatterColumns = new ArrayList<>(asStringList(spec.getParams().get("columns")));
                     String method = String.valueOf(spec.getParams().get("method"));
                     String valueExpr = String.valueOf(spec.getParams().getOrDefault("value_expr", ""));
-                    stream = stream.map(payload -> formatterPayload(payload, formatterColumns, method, valueExpr))
+                    stream = stream.map(row -> applyFormatter(row, formatterColumns, method, valueExpr))
                         .setParallelism(stagePlan.getMaxWorkers());
                     continue;
                 }
@@ -174,7 +173,7 @@ public class NativeStageExecutor {
                     List<String> dateColumns = new ArrayList<>(asStringList(spec.getParams().get("columns")));
                     LinkedHashMap<String, Object> formatterParams = new LinkedHashMap<>(spec.getParams());
                     formatterParams.put("columns", dateColumns);
-                    stream = stream.map(payload -> dateFormatterPayload(payload, dateColumns, formatterParams))
+                    stream = stream.map(row -> applyDateFormatter(row, dateColumns, formatterParams))
                         .setParallelism(stagePlan.getMaxWorkers());
                     continue;
                 }
@@ -187,7 +186,7 @@ public class NativeStageExecutor {
         List<RuntimeRow> resultRows = new ArrayList<>();
         try (var iterator = stream.executeAndCollect()) {
             while (iterator.hasNext()) {
-                resultRows.add(RuntimeRowWireCodec.decode(iterator.next()));
+                resultRows.add(iterator.next());
             }
         } catch (Exception exception) {
             throw new IllegalStateException("Unable to execute Flink native row stage.", exception);
@@ -604,68 +603,6 @@ public class NativeStageExecutor {
         return compiledExpressions;
     }
 
-    private static boolean matchesFilterPayload(
-        String payload,
-        RowExpressionEvaluator.CompiledBooleanExpression compiledExpression
-    ) {
-        return RowExpressionEvaluator.evaluateBooleanExpression(RuntimeRowWireCodec.decode(payload), compiledExpression);
-    }
-
-    private static String projectPayload(String payload, List<String> projectedColumns) {
-        return RuntimeRowWireCodec.encode(projectRow(RuntimeRowWireCodec.decode(payload), projectedColumns));
-    }
-
-    private static String renamePayload(String payload, List<String> currentColumns, Map<String, String> renameMap) {
-        return RuntimeRowWireCodec.encode(renameRow(RuntimeRowWireCodec.decode(payload), currentColumns, renameMap));
-    }
-
-    private static String tagPayload(
-        String payload,
-        String tagColumn,
-        List<RowExpressionEvaluator.CompiledBooleanExpression> compiledConditions,
-        List<String> tags,
-        Object defaultTag
-    ) {
-        return RuntimeRowWireCodec.encode(
-            applyTag(RuntimeRowWireCodec.decode(payload), tagColumn, compiledConditions, tags, defaultTag)
-        );
-    }
-
-    private static String constantPayload(String payload, Map<String, Object> constantValues) {
-        return RuntimeRowWireCodec.encode(applyConstant(RuntimeRowWireCodec.decode(payload), constantValues));
-    }
-
-    private static String valueMappingPayload(
-        String payload,
-        List<String> mappingColumns,
-        Map<String, Map<String, Object>> mappings,
-        Object defaultValue,
-        boolean replaceMode
-    ) {
-        return RuntimeRowWireCodec.encode(
-            applyValueMapping(RuntimeRowWireCodec.decode(payload), mappingColumns, mappings, defaultValue, replaceMode)
-        );
-    }
-
-    private static String vectorizedColAssignPayload(
-        String payload,
-        String columnName,
-        RowExpressionEvaluator.CompiledBooleanExpression compiledCondition,
-        RowExpressionEvaluator.CompiledValueExpression compiledValue
-    ) {
-        return RuntimeRowWireCodec.encode(
-            applyVectorizedColAssign(RuntimeRowWireCodec.decode(payload), columnName, compiledCondition, compiledValue)
-        );
-    }
-
-    private static String formatterPayload(String payload, List<String> columns, String method, String valueExpr) {
-        return RuntimeRowWireCodec.encode(applyFormatter(RuntimeRowWireCodec.decode(payload), columns, method, valueExpr));
-    }
-
-    private static String dateFormatterPayload(String payload, List<String> columns, Map<String, Object> params) {
-        return RuntimeRowWireCodec.encode(applyDateFormatter(RuntimeRowWireCodec.decode(payload), columns, params));
-    }
-
     private static RuntimeRow applyTag(
         RuntimeRow row,
         String tagColumn,
@@ -847,8 +784,16 @@ public class NativeStageExecutor {
                     || value instanceof Short
                     || value instanceof Integer
                     || value instanceof Long);
-                double sum = values.stream().mapToDouble(value -> ((Number) value).doubleValue()).sum();
-                return allIntegral ? Math.round(sum) : sum;
+                // 中文说明：和 Python/pandas 一样，纯整型列求和后应继续保持整型结果，
+                // 避免 25 被算成 25.0 这种对前端展示和一致性测试都不友好的漂移。
+                if (allIntegral) {
+                    long integralSum = 0L;
+                    for (Object value : values) {
+                        integralSum += ((Number) value).longValue();
+                    }
+                    return integralSum;
+                }
+                return values.stream().mapToDouble(value -> ((Number) value).doubleValue()).sum();
             }
             return values.stream().map(String::valueOf).reduce("", String::concat);
         }
