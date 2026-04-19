@@ -45,5 +45,6 @@
 ## 说明
 
 - 当前以 Gradle wrapper 作为标准构建入口，已对齐到 `/Users/fortunebian/Downloads/repos/backend-flink` 的 wrapper 体系。
-- 工程目标 Java 版本为 `17`。
+- 工程目标 Java 版本为 `21`。
+- 当前 Gradle wrapper 为 `8.7`，运行 `./gradlew` 也需要本机 `JAVA_HOME` 指向 JDK 17+；如果要和工程目标保持一致，建议直接切到 JDK 21。
 - 更完整的实现细节、并行规划逻辑、当前原生支持边界和 fallback 算子说明见 [优化说明.md](/Users/fortunebian/Desktop/data-processor/backend-flink/优化说明.md)。

@@ -6,7 +6,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 // 中文说明：RuntimeTable 是 Java 侧 /run 的统一中间态，既能驱动原生 stage，也能和 Python fallback 互转 CSV。
 public class RuntimeTable {
@@ -17,7 +16,10 @@ public class RuntimeTable {
     public RuntimeTable(List<String> columns, List<RuntimeRow> rows) {
         this.columns = new ArrayList<>(columns);
         // 中文说明：这里保留调用方给出的当前行顺序；_row_id 只承担稳定索引身份，不能反过来把 sort 后顺序洗掉。
-        this.rows = rows.stream().map(RuntimeRow::copy).toList();
+        this.rows = new ArrayList<>();
+        for (RuntimeRow row : rows) {
+            this.rows.add(row.copy());
+        }
     }
 
     public List<String> getColumns() {
@@ -25,7 +27,11 @@ public class RuntimeTable {
     }
 
     public List<RuntimeRow> getRows() {
-        return rows.stream().map(RuntimeRow::copy).toList();
+        List<RuntimeRow> copies = new ArrayList<>();
+        for (RuntimeRow row : rows) {
+            copies.add(row.copy());
+        }
+        return copies;
     }
 
     public int getRowCount() {
@@ -38,17 +44,21 @@ public class RuntimeTable {
 
     public RuntimeTable projectColumns(List<String> requestedColumns) {
         Set<String> columnSet = new LinkedHashSet<>(requestedColumns);
-        List<String> projectedColumns = columns.stream().filter(columnSet::contains).toList();
-        List<RuntimeRow> projectedRows = rows.stream()
-            .map(row -> {
-                LinkedHashMap<String, Object> values = new LinkedHashMap<>();
-                Map<String, Object> source = row.getValues();
-                for (String column : projectedColumns) {
-                    values.put(column, source.get(column));
-                }
-                return new RuntimeRow(row.getRowId(), values);
-            })
-            .toList();
+        List<String> projectedColumns = new ArrayList<>();
+        for (String column : columns) {
+            if (columnSet.contains(column)) {
+                projectedColumns.add(column);
+            }
+        }
+        List<RuntimeRow> projectedRows = new ArrayList<>();
+        for (RuntimeRow row : rows) {
+            LinkedHashMap<String, Object> values = new LinkedHashMap<>();
+            Map<String, Object> source = row.getValues();
+            for (String column : projectedColumns) {
+                values.put(column, source.get(column));
+            }
+            projectedRows.add(new RuntimeRow(row.getRowId(), values));
+        }
         return new RuntimeTable(projectedColumns, projectedRows);
     }
 
@@ -66,15 +76,14 @@ public class RuntimeTable {
             mergedRows.add(new RuntimeRow(row.getRowId(), values));
         }
 
-        List<RuntimeRow> normalizedRows = mergedRows.stream()
-            .map(row -> {
-                LinkedHashMap<String, Object> mergedValues = row.getValues();
-                for (String resultColumn : resultColumns) {
-                    mergedValues.putIfAbsent(resultColumn, null);
-                }
-                return new RuntimeRow(row.getRowId(), mergedValues);
-            })
-            .toList();
+        List<RuntimeRow> normalizedRows = new ArrayList<>();
+        for (RuntimeRow row : mergedRows) {
+            LinkedHashMap<String, Object> mergedValues = row.getValues();
+            for (String resultColumn : resultColumns) {
+                mergedValues.putIfAbsent(resultColumn, null);
+            }
+            normalizedRows.add(new RuntimeRow(row.getRowId(), mergedValues));
+        }
 
         List<String> mergedColumns = new ArrayList<>(columns);
         for (String resultColumn : resultColumns) {

@@ -32,9 +32,14 @@ group = 'com.dataprocessor'
 version = '0.0.1-SNAPSHOT'
 description = 'Hybrid Java/Flink backend for pipeline parity with the Python reference engine'
 
-// 保持 Java 17 编译目标，但不再强制要求额外安装一个独立的 17 toolchain。
-sourceCompatibility = JavaVersion.VERSION_17
-targetCompatibility = JavaVersion.VERSION_17
+// 统一切到 JDK 21：声明编译目标，并在本机已安装时优先使用 21 toolchain。
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
 
 ext {
     flinkVersion = '1.18.1'
@@ -77,8 +82,8 @@ tasks.named('test') {
     useJUnitPlatform()
 }
 
-// 直接用当前 Gradle JVM 输出 Java 17 兼容字节码，避免 IntelliJ 导入时再触发 toolchain 查找。
+// 显式输出 Java 21 兼容字节码，避免 IDE 和 CLI 对默认目标版本理解不一致。
 tasks.withType(JavaCompile).configureEach {
-    options.release = 17
+    options.release = 21
     options.encoding = 'UTF-8'
 }
