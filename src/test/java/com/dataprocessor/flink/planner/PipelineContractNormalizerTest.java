@@ -86,4 +86,52 @@ class PipelineContractNormalizerTest {
         Assertions.assertEquals("constant", normalized.get(0).get("type"));
         Assertions.assertEquals("value_mapping", normalized.get(1).get("type"));
     }
+
+    @Test
+    void normalizesAggregateMethodToLowercaseCanonicalValue() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson("""
+            [
+              {
+                "type": "aggregate",
+                "params": {
+                  "by": ["Client Account", "Contract"],
+                  "actions": {
+                    "method": "Sum",
+                    "on": ["Quantity"]
+                  }
+                }
+              }
+            ]
+            """);
+
+        Assertions.assertEquals(
+            "sum",
+            ((Map<?, ?>) ((Map<?, ?>) normalized.get(0).get("params")).get("actions")).get("method")
+        );
+    }
+
+    @Test
+    void normalizesAggregateStringFieldsToCanonicalLists() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson("""
+            [
+              {
+                "type": "aggregate",
+                "params": {
+                  "by": "Client Account, Contract",
+                  "actions": {
+                    "method": "sum",
+                    "on": "Quantity",
+                    "rename": ""
+                  }
+                }
+              }
+            ]
+            """);
+
+        Map<?, ?> params = (Map<?, ?>) normalized.get(0).get("params");
+        Map<?, ?> actions = (Map<?, ?>) params.get("actions");
+        Assertions.assertEquals(List.of("Client Account", "Contract"), params.get("by"));
+        Assertions.assertEquals(List.of("Quantity"), actions.get("on"));
+        Assertions.assertEquals(List.of(), actions.get("rename"));
+    }
 }

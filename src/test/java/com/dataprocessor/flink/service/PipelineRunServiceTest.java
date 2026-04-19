@@ -205,6 +205,89 @@ class PipelineRunServiceTest {
     }
 
     @Test
+    void aggregateWithDisplayCaseMethodStaysOnNativePath() {
+        PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
+
+        PipelineRunService pipelineRunService = new PipelineRunService(
+            new PipelineContractNormalizer(new ObjectMapper()),
+            new StagePlanner(new OperatorCapabilityRegistry(), new RowExpressionEvaluator()),
+            new NativeStageExecutor(Mockito.mock(BatchTableEnvironmentFactory.class), new RowExpressionEvaluator()),
+            pythonFallbackBridge,
+            new CsvRuntimeTableCodec(),
+            new ObjectMapper()
+        );
+
+        Map<String, Object> response = pipelineRunService.runPipeline(
+            "Client Account,Contract,Quantity\nA,C1,10\nA,C1,15\nB,C2,7\n".getBytes(StandardCharsets.UTF_8),
+            """
+                [
+                  {
+                    "type": "aggregate",
+                    "params": {
+                      "by": ["Client Account", "Contract"],
+                      "actions": {
+                        "method": "Sum",
+                        "on": ["Quantity"]
+                      }
+                    }
+                  }
+                ]
+                """,
+            false,
+            false
+        );
+
+        Assertions.assertEquals(List.of("Client Account", "Contract", "Quantity"), response.get("columns"));
+        Assertions.assertEquals(
+            List.of(List.of("A", "C1", 25L), List.of("B", "C2", 7L)),
+            response.get("data")
+        );
+        verify(pythonFallbackBridge, never()).run(any(), anyString(), anyBoolean());
+    }
+
+    @Test
+    void aggregateWithStringFieldsStaysOnNativePath() {
+        PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
+
+        PipelineRunService pipelineRunService = new PipelineRunService(
+            new PipelineContractNormalizer(new ObjectMapper()),
+            new StagePlanner(new OperatorCapabilityRegistry(), new RowExpressionEvaluator()),
+            new NativeStageExecutor(Mockito.mock(BatchTableEnvironmentFactory.class), new RowExpressionEvaluator()),
+            pythonFallbackBridge,
+            new CsvRuntimeTableCodec(),
+            new ObjectMapper()
+        );
+
+        Map<String, Object> response = pipelineRunService.runPipeline(
+            "Client Account,Contract,Quantity\nA,C1,10\nA,C1,15\nB,C2,7\n".getBytes(StandardCharsets.UTF_8),
+            """
+                [
+                  {
+                    "type": "aggregate",
+                    "params": {
+                      "by": "Client Account,Contract",
+                      "actions": {
+                        "method": "sum",
+                        "on": "Quantity",
+                        "rename": ""
+                      }
+                    }
+                  }
+                ]
+                """,
+            false,
+            false
+        );
+
+        Assertions.assertEquals(List.of("Client Account", "Contract", "Quantity"), response.get("columns"));
+        Assertions.assertEquals(
+            List.of(List.of("A", "C1", 25L), List.of("B", "C2", 7L)),
+            response.get("data")
+        );
+        verify(pythonFallbackBridge, never()).run(any(), anyString(), anyBoolean());
+    }
+
+    @Test
     void fallbackStageReadsCompactPythonResponse() {
         PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
         when(pythonFallbackBridge.run(any(), anyString(), eq(false))).thenReturn(

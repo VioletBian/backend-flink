@@ -2,6 +2,7 @@ package com.dataprocessor.flink.planner;
 
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -97,11 +98,47 @@ public class PipelineContractNormalizer {
                 }
                 params.put("actions", actionList.get(0));
             }
+            // 中文说明：aggregate 在前端编辑态里经常把 by/on/rename 序列化成逗号分隔字符串，
+            // 这里统一归一化成共享 DSL 约定的字符串数组，避免 planner 因字段形态不一致误判为 Python fallback。
+            params.put("by", normalizeStringListLike(params.get("by")));
+            // 中文说明：前端 aggregate method 可能带展示态大小写（如 `Sum`），这里统一收敛成小写 canonical，
+            // 避免 planner/native executor 因大小写不一致误判为需要回退 Python。
+            if (params.get("actions") instanceof Map<?, ?> actionMap) {
+                LinkedHashMap<String, Object> canonicalActions = new LinkedHashMap<>((Map<String, Object>) actionMap);
+                canonicalActions.put("on", normalizeStringListLike(canonicalActions.get("on")));
+                canonicalActions.put("rename", normalizeStringListLike(canonicalActions.get("rename")));
+                Object rawMethod = canonicalActions.get("method");
+                if (rawMethod != null) {
+                    canonicalActions.put("method", String.valueOf(rawMethod).trim().toLowerCase(Locale.ROOT));
+                }
+                params.put("actions", canonicalActions);
+            }
         }
 
         Map<String, Object> normalized = new LinkedHashMap<>();
         normalized.put("type", stepType);
         normalized.put("params", params);
         return normalized;
+    }
+
+    private List<String> normalizeStringListLike(Object rawValue) {
+        if (rawValue instanceof List<?> rawList) {
+            return rawList.stream()
+                .map(String::valueOf)
+                .map(String::trim)
+                .filter(value -> !value.isEmpty())
+                .toList();
+        }
+        if (rawValue instanceof String rawString) {
+            String trimmed = rawString.trim();
+            if (trimmed.isEmpty()) {
+                return List.of();
+            }
+            return List.of(trimmed.split(",")).stream()
+                .map(String::trim)
+                .filter(value -> !value.isEmpty())
+                .toList();
+        }
+        return List.of();
     }
 }
