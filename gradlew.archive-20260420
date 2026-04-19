@@ -86,18 +86,6 @@ APP_BASE_NAME=${0##*/}
 # Discard cd standard output in case $CDPATH is set (https://github.com/gradle/gradle/issues/25036)
 APP_HOME=$( cd "${APP_HOME:-./}" > /dev/null && pwd -P ) || exit
 
-# 中文说明：当前环境的系统默认 Java 仍可能是 1.8，而 Gradle 8 / Spring Boot 3.2 需要更高版本；
-# 未显式设置时优先复用项目可访问的 JDK 21，避免每次手动 export JAVA_HOME。
-if [ -z "$JAVA_HOME" ] ; then
-    if [ -n "$BACKEND_FLINK_JAVA_HOME" ] && [ -x "$BACKEND_FLINK_JAVA_HOME/bin/java" ] ; then
-        JAVA_HOME="$BACKEND_FLINK_JAVA_HOME"
-        export JAVA_HOME
-    elif [ -x "/tmp/jdk-21.0.10+7/Contents/Home/bin/java" ] ; then
-        JAVA_HOME="/tmp/jdk-21.0.10+7/Contents/Home"
-        export JAVA_HOME
-    fi
-fi
-
 # Use the maximum available, or set MAX_FD != -1 to use that value.
 MAX_FD=maximum
 

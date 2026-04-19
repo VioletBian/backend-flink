@@ -1,0 +1,2 @@
+// 保持根项目名称与镜像项目一致，避免 wrapper / IDE 导入时出现额外差异。
+rootProject.name = 'backend-flink'

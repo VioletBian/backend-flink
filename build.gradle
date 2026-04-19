@@ -1,30 +1,13 @@
-// 先走内网 Maven 仓解析 Spring Boot 插件，避免依赖 Gradle Plugin Portal。
+// 统一从公开仓解析 Spring Boot Gradle 插件，避免旧配置里私有仓地址失效影响构建。
 buildscript {
     repositories {
         mavenCentral()
-        maven {
-            url 'http://area.services.xx.com/area/repo/public'
-            allowInsecureProtocol = true
-        }
-        maven {
-            url 'http://prod-5.area.site.xx.com'
-            allowInsecureProtocol = true
-        }
-        maven {
-            url 'http://gxxscentral.services.xx.com'
-            allowInsecureProtocol = true
-        }
-        maven {
-            url 'http://gxxscentral.area.services.xx.com/maven'
-            allowInsecureProtocol = true
-        }
     }
     dependencies {
         classpath 'org.springframework.boot:spring-boot-gradle-plugin:3.2.5'
     }
 }
 
-// 对齐公司已有 Gradle 项目的 apply plugin 写法，减少插件解析链路差异。
 apply plugin: 'java'
 apply plugin: 'org.springframework.boot'
 
@@ -32,7 +15,13 @@ group = 'com.dataprocessor'
 version = '0.0.1-SNAPSHOT'
 description = 'Hybrid Java/Flink backend for pipeline parity with the Python reference engine'
 
-// 统一切到 JDK 21：声明编译目标，并在本机已安装时优先使用 21 toolchain。
+ext {
+    springBootVersion = '3.2.5'
+    flinkVersion = '1.18.1'
+    commonsCsvVersion = '1.10.0'
+}
+
+// 统一声明 Java 21 编译目标，保证 CLI、IDE 与 CI 的字节码输出一致。
 java {
     sourceCompatibility = JavaVersion.VERSION_21
     targetCompatibility = JavaVersion.VERSION_21
@@ -41,49 +30,33 @@ java {
     }
 }
 
-ext {
-    springBootVersion = '3.2.5'
-    flinkVersion = '1.18.1'
-}
-
-// 优先走内网仓库，再回退到 Maven Central，兼顾内网与开源依赖镜像场景。
+// 当前项目只依赖公开组件，收敛到 Maven Central 可以减少仓库握手和 5xx 干扰。
 repositories {
     mavenCentral()
-    maven {
-        url 'http://area.services.gxxs.com/area/repo/public'
-        allowInsecureProtocol = true
-    }
-    maven {
-        url 'http://prod-5.area.site.gxxs.com'
-        allowInsecureProtocol = true
-    }
-    maven {
-        url 'http://gxxscentral.services.gxxs.com'
-        allowInsecureProtocol = true
-    }
-    maven {
-        url 'http://gxxscentral.area.services.gxxs.com/maven'
-        allowInsecureProtocol = true
-    }
 }
 
-// 按原 pom.xml 逐项迁移运行时与测试依赖，避免行为漂移。
+// 按源码 import 补齐最小可编译依赖，尤其保留 Flink 与 Mongo，并补上 CSV 编解码器直接依赖。
 dependencies {
     implementation "org.springframework.boot:spring-boot-starter-web:${springBootVersion}"
     implementation "org.springframework.boot:spring-boot-starter-validation:${springBootVersion}"
     implementation "org.springframework.boot:spring-boot-starter-data-mongodb:${springBootVersion}"
+
     implementation "org.apache.flink:flink-clients:${flinkVersion}"
+    implementation "org.apache.flink:flink-streaming-java:${flinkVersion}"
     implementation "org.apache.flink:flink-table-api-java-bridge:${flinkVersion}"
+
+    implementation "org.apache.commons:commons-csv:${commonsCsvVersion}"
 
     testImplementation "org.springframework.boot:spring-boot-starter-test:${springBootVersion}"
 }
 
-// Spring Boot 测试基于 JUnit Platform，需要显式打开。
+// JDK 21 下 Flink/Kryo 测试会反射访问 JDK 集合实现，显式开放模块后可避免把模块限制误判成构建失败。
 tasks.named('test') {
     useJUnitPlatform()
+    jvmArgs '--add-opens=java.base/java.util=ALL-UNNAMED', '-XX:+EnableDynamicAgentLoading'
 }
 
-// 显式输出 Java 21 兼容字节码，避免 IDE 和 CLI 对默认目标版本理解不一致。
+// 显式锁定 release 和编码，避免本机默认 JDK/编码差异导致的编译漂移。
 tasks.withType(JavaCompile).configureEach {
     options.release = 21
     options.encoding = 'UTF-8'
