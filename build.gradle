@@ -1,6 +1,7 @@
 // 先走内网 Maven 仓解析 Spring Boot 插件，避免依赖 Gradle Plugin Portal。
 buildscript {
     repositories {
+        mavenCentral()
         maven {
             url 'http://area.services.xx.com/area/repo/public'
             allowInsecureProtocol = true
@@ -17,7 +18,6 @@ buildscript {
             url 'http://gxxscentral.area.services.xx.com/maven'
             allowInsecureProtocol = true
         }
-        mavenCentral()
     }
     dependencies {
         classpath 'org.springframework.boot:spring-boot-gradle-plugin:3.2.5'
@@ -42,11 +42,13 @@ java {
 }
 
 ext {
+    springBootVersion = '3.2.5'
     flinkVersion = '1.18.1'
 }
 
 // 优先走内网仓库，再回退到 Maven Central，兼顾内网与开源依赖镜像场景。
 repositories {
+    mavenCentral()
     maven {
         url 'http://area.services.gxxs.com/area/repo/public'
         allowInsecureProtocol = true
@@ -63,18 +65,17 @@ repositories {
         url 'http://gxxscentral.area.services.gxxs.com/maven'
         allowInsecureProtocol = true
     }
-    mavenCentral()
 }
 
 // 按原 pom.xml 逐项迁移运行时与测试依赖，避免行为漂移。
 dependencies {
-    implementation 'org.springframework.boot:spring-boot-starter-web'
-    implementation 'org.springframework.boot:spring-boot-starter-validation'
-    implementation 'org.springframework.boot:spring-boot-starter-data-mongodb'
+    implementation "org.springframework.boot:spring-boot-starter-web:${springBootVersion}"
+    implementation "org.springframework.boot:spring-boot-starter-validation:${springBootVersion}"
+    implementation "org.springframework.boot:spring-boot-starter-data-mongodb:${springBootVersion}"
     implementation "org.apache.flink:flink-clients:${flinkVersion}"
     implementation "org.apache.flink:flink-table-api-java-bridge:${flinkVersion}"
 
-    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation "org.springframework.boot:spring-boot-starter-test:${springBootVersion}"
 }
 
 // Spring Boot 测试基于 JUnit Platform，需要显式打开。

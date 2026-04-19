@@ -31,7 +31,6 @@ import com.dataprocessor.flink.runtime.RuntimeRowWireCodec;
 import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.springframework.stereotype.Component;
 
 // 中文说明：这里把“已经能静态证明语义安全”的算子尽量收进 Java native；
@@ -84,10 +83,13 @@ public class NativeStageExecutor {
         List<String> currentColumns = new ArrayList<>(inputTable.getColumns());
         StreamExecutionEnvironment env = batchTableEnvironmentFactory.createBatchStreamExecutionEnvironment(stagePlan.getMaxWorkers());
         env.setRuntimeMode(RuntimeExecutionMode.BATCH);
+        List<RuntimeRow> sourceRows = new ArrayList<>(inputTable.getRows());
 
-        // 中文说明：rows 路径统一传 String payload，不把 RuntimeRow 的动态 values 结构直接交给 Flink。
-        // 这样既保留 row-local 并行，又能避开 Java 17 下 GenericType/Kryo 的反射兼容问题。
-        DataStream<String> stream = env.addSource(new RuntimeRowPayloadSource(inputTable.getRows()))
+        // 中文说明：这里改用 bounded sequence source 生成行索引，再在单并发 map 中取出 payload。
+        // 这样既保留 batch mode，又避免 SourceFunction 被 Flink 识别成 unbounded source。
+        DataStream<String> stream = env.fromSequence(0L, sourceRows.size() - 1L)
+            .setParallelism(1)
+            .map(index -> RuntimeRowWireCodec.encode(sourceRows.get(Math.toIntExact(index))))
             .setParallelism(1)
             .rebalance();
         for (OperationSpec spec : stagePlan.getSpecs()) {
@@ -1098,34 +1100,5 @@ public class NativeStageExecutor {
     }
 
     private record GroupKey(List<Object> values) {
-    }
-
-    private static final class RuntimeRowPayloadSource implements SourceFunction<String> {
-        private final List<RuntimeRow> rows;
-        private volatile boolean running = true;
-
-        private RuntimeRowPayloadSource(List<RuntimeRow> rows) {
-            this.rows = new ArrayList<>();
-            for (RuntimeRow row : rows) {
-                this.rows.add(row.copy());
-            }
-        }
-
-        @Override
-        public void run(SourceContext<String> context) {
-            for (RuntimeRow row : rows) {
-                if (!running) {
-                    return;
-                }
-                synchronized (context.getCheckpointLock()) {
-                    context.collect(RuntimeRowWireCodec.encode(row));
-                }
-            }
-        }
-
-        @Override
-        public void cancel() {
-            running = false;
-        }
     }
 }
