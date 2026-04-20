@@ -197,6 +197,32 @@ class StagePlannerTest {
     }
 
     @Test
+    void simpleTagConditionsWithSingleAmpersandStayNative() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson("""
+            [
+              {
+                "type": "tag",
+                "params": {
+                  "conditions": ["Price > 10 & `Client Account` != null", "Price > 8"],
+                  "tag_col_name": "Alert",
+                  "tags": ["HIGH", "MEDIUM"],
+                  "default_tag": "LOW"
+                }
+              }
+            ]
+            """);
+        List<Map<String, Object>> prepared = planner.materializeRunSteps(normalized, ExecutionConfig.AUTO);
+        List<OperationSpec> specs = planner.parsePipelineSpecs(prepared, ExecutionConfig.AUTO);
+        StagePlanner.CandidateSegment candidateSegment = planner.collectCandidateSegment(specs, 0);
+
+        StagePlan stagePlan = planner.chooseStage(buildFilterRuntimeTable(), candidateSegment, 0);
+
+        Assertions.assertEquals(ExecutionConfig.SERIAL, stagePlan.getStrategy());
+        Assertions.assertTrue(stagePlan.isNativeCapable());
+        Assertions.assertEquals("FLINK_NATIVE", stagePlan.getExecutorKind());
+    }
+
+    @Test
     void vectorizedColAssignIsPlannedAsNativeRowStage() {
         List<Map<String, Object>> normalized = normalizer.normalizeJson("""
             [

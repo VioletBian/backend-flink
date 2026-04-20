@@ -154,6 +154,50 @@ class PipelineRunServiceTest {
     }
 
     @Test
+    void tagWithSimpleStringConditionsStaysOnNativePath() {
+        PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
+
+        PipelineRunService pipelineRunService = new PipelineRunService(
+            new PipelineContractNormalizer(new ObjectMapper()),
+            new StagePlanner(new OperatorCapabilityRegistry(), new RowExpressionEvaluator()),
+            new NativeStageExecutor(Mockito.mock(BatchTableEnvironmentFactory.class), new RowExpressionEvaluator()),
+            pythonFallbackBridge,
+            new CsvRuntimeTableCodec(),
+            new ObjectMapper()
+        );
+
+        Map<String, Object> response = pipelineRunService.runPipeline(
+            "A,B,C\n3,1,0\n1,3,5\n0,0,4\n".getBytes(StandardCharsets.UTF_8),
+            """
+                [
+                  {
+                    "type": "tag",
+                    "params": {
+                      "conditions": "A > 2 & B < 2, B > 2, C > 3",
+                      "tag_col_name": "RuleTag",
+                      "tags": "MATCH_AB, MATCH_B, MATCH_C",
+                      "default_tag": "OTHER"
+                    }
+                  }
+                ]
+                """,
+            false,
+            false
+        );
+
+        Assertions.assertEquals(List.of("A", "B", "C", "RuleTag"), response.get("columns"));
+        Assertions.assertEquals(
+            List.of(
+                List.of(3L, 1L, 0L, "MATCH_AB"),
+                List.of(1L, 3L, 5L, "MATCH_B"),
+                List.of(0L, 0L, 4L, "MATCH_C")
+            ),
+            response.get("data")
+        );
+        verify(pythonFallbackBridge, never()).run(any(), anyString(), anyBoolean());
+    }
+
+    @Test
     void constantAndValueMappingPipelineStaysOnNativePath() {
         PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
 

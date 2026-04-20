@@ -141,7 +141,7 @@ public class RowExpressionEvaluator {
     }
 
     private ExpressionBinding rewriteToSpel(String expression, List<String> availableColumns) {
-        String normalizedExpression = expression
+        String normalizedExpression = normalizeLogicalOperators(expression)
             .replace("&&", " and ")
             .replace("||", " or ")
             .replace(" None", " null")
@@ -209,6 +209,43 @@ public class RowExpressionEvaluator {
             cursor++;
         }
         return new ExpressionBinding(rewritten.toString(), variableMapping);
+    }
+
+    // 中文说明：前端轻表达式经常把布尔连接符写成单个 `&` / `|`，
+    // 这里在不进入字符串字面量的前提下统一转成 SpEL 可识别的 `and` / `or`。
+    private String normalizeLogicalOperators(String expression) {
+        StringBuilder normalized = new StringBuilder();
+        int cursor = 0;
+        while (cursor < expression.length()) {
+            char current = expression.charAt(cursor);
+            if (current == '\'' || current == '"') {
+                int end = consumeQuotedLiteral(expression, cursor, current);
+                normalized.append(expression, cursor, end);
+                cursor = end;
+                continue;
+            }
+            if (current == '&') {
+                if (cursor + 1 < expression.length() && expression.charAt(cursor + 1) == '&') {
+                    cursor += 2;
+                } else {
+                    cursor += 1;
+                }
+                normalized.append(" and ");
+                continue;
+            }
+            if (current == '|') {
+                if (cursor + 1 < expression.length() && expression.charAt(cursor + 1) == '|') {
+                    cursor += 2;
+                } else {
+                    cursor += 1;
+                }
+                normalized.append(" or ");
+                continue;
+            }
+            normalized.append(current);
+            cursor++;
+        }
+        return normalized.toString();
     }
 
     private int consumeQuotedLiteral(String expression, int start, char quote) {

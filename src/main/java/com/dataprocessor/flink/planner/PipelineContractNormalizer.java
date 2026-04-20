@@ -87,6 +87,12 @@ public class PipelineContractNormalizer {
         if ("tag".equals(stepType) && !params.containsKey("tag_col_name") && params.containsKey("col_name")) {
             params.put("tag_col_name", params.remove("col_name"));
         }
+        if ("tag".equals(stepType)) {
+            // 中文说明：tag 编辑态里 conditions / tags 可能被前端序列化成逗号分隔字符串，
+            // 这里统一转成 canonical 字符串数组，避免 planner 因字段形态不一致误判为 Python fallback。
+            params.put("conditions", normalizeStringListLike(params.get("conditions")));
+            params.put("tags", normalizeStringListLike(params.get("tags")));
+        }
 
         if ("aggregate".equals(stepType)) {
             Object actions = params.get("actions");

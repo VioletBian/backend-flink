@@ -1,5 +1,6 @@
 package com.dataprocessor.flink.service;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -57,6 +58,34 @@ class NativeStageExecutorTest {
         Assertions.assertEquals(List.of("Client Account", "Price", "Alert"), resultTable.getColumns());
         Assertions.assertEquals("HIGH", resultTable.getRows().get(0).getValues().get("Alert"));
         Assertions.assertEquals("SECOND", resultTable.getRows().get(1).getValues().get("Alert"));
+    }
+
+    @Test
+    void executesTagWithSingleAmpersandCondition() {
+        NativeStageExecutor executor = createExecutor();
+
+        RuntimeTable resultTable = executor.execute(
+            buildSampleTable(),
+            buildStagePlan(
+                List.of(new OperationSpec(
+                    "tag",
+                    Map.of(
+                        "conditions", List.of("Price >= 10 & `Client Account` == '7001'", "Price >= 9"),
+                        "tag_col_name", "Alert",
+                        "tags", List.of("HIGH", "WATCH"),
+                        "default_tag", "OTHER"
+                    ),
+                    "index > -1",
+                    0,
+                    new ExecutionConfig(ExecutionConfig.SERIAL, null)
+                )),
+                List.of("tag")
+            )
+        );
+
+        Assertions.assertEquals(List.of("Client Account", "Price", "Alert"), resultTable.getColumns());
+        Assertions.assertEquals("HIGH", resultTable.getRows().get(0).getValues().get("Alert"));
+        Assertions.assertEquals("WATCH", resultTable.getRows().get(1).getValues().get("Alert"));
     }
 
     @Test
@@ -353,6 +382,107 @@ class NativeStageExecutorTest {
         Assertions.assertEquals(1L, resultTable.getRows().get(2).getValues().get("Quantity"));
     }
 
+    @Test
+    void rowsStrategyMatchesSerialForLongRowLocalPipeline() {
+        NativeStageExecutor executor = createExecutor();
+        RuntimeTable source = buildLongRowsTable(20000);
+        List<OperationSpec> specs = List.of(
+            new OperationSpec(
+                "filter",
+                Map.of(
+                    "requiredCols",
+                    List.of(
+                        "account_id",
+                        "qty",
+                        "price",
+                        "fee",
+                        "metric_0",
+                        "metric_1",
+                        "metric_2",
+                        "metric_3",
+                        "trade_date_local",
+                        "settle_date_local"
+                    )
+                ),
+                "metric_0 >= 0",
+                0,
+                new ExecutionConfig(ExecutionConfig.SERIAL, null)
+            ),
+            new OperationSpec(
+                "tag",
+                Map.of(
+                    "tag_col_name", "risk_bucket",
+                    "conditions", List.of("metric_1 % 2 == 0", "metric_2 % 5 == 0"),
+                    "tags", List.of("even", "penta"),
+                    "default_tag", "base"
+                ),
+                "index > -1",
+                1,
+                new ExecutionConfig(ExecutionConfig.SERIAL, null)
+            ),
+            new OperationSpec(
+                "col_assign",
+                Map.of("method", "vectorized", "col_name", "notional", "value_expr", "qty * price + fee"),
+                "index > -1",
+                2,
+                new ExecutionConfig(ExecutionConfig.SERIAL, null)
+            ),
+            new OperationSpec(
+                "col_assign",
+                Map.of("method", "vectorized", "col_name", "risk_score", "value_expr", "notional - metric_3 * 13"),
+                "index > -1",
+                3,
+                new ExecutionConfig(ExecutionConfig.SERIAL, null)
+            ),
+            new OperationSpec(
+                "date_formatter",
+                Map.of(
+                    "columns", List.of("trade_date_local", "settle_date_local"),
+                    "from_format", "yyyyMMdd",
+                    "to_format", "UTC",
+                    "from_timezone", "Asia/Shanghai",
+                    "to_timezone", "UTC"
+                ),
+                "index > -1",
+                4,
+                new ExecutionConfig(ExecutionConfig.SERIAL, null)
+            ),
+            new OperationSpec(
+                "formatter",
+                Map.of("method", "DecimalScale", "columns", List.of("notional", "risk_score"), "value_expr", 2),
+                "index > -1",
+                5,
+                new ExecutionConfig(ExecutionConfig.SERIAL, null)
+            ),
+            new OperationSpec(
+                "formatter",
+                Map.of("method", "StringPrefix", "columns", List.of("risk_bucket"), "value_expr", "bucket_"),
+                "index > -1",
+                6,
+                new ExecutionConfig(ExecutionConfig.SERIAL, null)
+            )
+        );
+
+        List<Integer> logicalStepIndexes = List.of(0, 1, 2, 3, 4, 5, 6);
+        List<String> operationTypes = List.of("filter", "tag", "col_assign", "col_assign", "date_formatter", "formatter", "formatter");
+
+        RuntimeTable serialResult = executor.execute(
+            source,
+            new StagePlan(0, ExecutionConfig.SERIAL, logicalStepIndexes, operationTypes, specs, 1, true, null)
+        );
+        RuntimeTable rowsResult = executor.execute(
+            source,
+            new StagePlan(0, ExecutionConfig.ROWS, logicalStepIndexes, operationTypes, specs, 4, true, null)
+        );
+
+        Assertions.assertEquals(serialResult.getColumns(), rowsResult.getColumns());
+        Assertions.assertEquals(serialResult.getRows().size(), rowsResult.getRows().size());
+        for (int index = 0; index < serialResult.getRows().size(); index++) {
+            Assertions.assertEquals(serialResult.getRows().get(index).getRowId(), rowsResult.getRows().get(index).getRowId());
+            Assertions.assertEquals(serialResult.getRows().get(index).getValues(), rowsResult.getRows().get(index).getValues());
+        }
+    }
+
     private NativeStageExecutor createExecutor() {
         return new NativeStageExecutor(
             Mockito.mock(BatchTableEnvironmentFactory.class),
@@ -367,6 +497,41 @@ class NativeStageExecutorTest {
                 new RuntimeRow(0L, new LinkedHashMap<>(Map.of("Client Account", "7001", "Price", 11L))),
                 new RuntimeRow(1L, new LinkedHashMap<>(Map.of("Client Account", "7002", "Price", 9L)))
             )
+        );
+    }
+
+    private RuntimeTable buildLongRowsTable(int rowCount) {
+        int[] tradeDates = {20250106, 20250113, 20250120, 20250127, 20250210, 20250217};
+        int[] settleDates = {20250107, 20250114, 20250121, 20250128, 20250211, 20250218};
+        List<RuntimeRow> rows = new ArrayList<>();
+        for (int index = 0; index < rowCount; index++) {
+            LinkedHashMap<String, Object> values = new LinkedHashMap<>();
+            values.put("account_id", 9_000_000_000L + (index % 50_000));
+            values.put("qty", (long) ((index % 97) + 1));
+            values.put("price", ((index * 13L) % 10_000) / 37.0 + 100.0);
+            values.put("fee", (long) ((index % 17) + 1));
+            values.put("metric_0", (long) (index % 97));
+            values.put("metric_1", (long) ((index * 7L) % 10_003));
+            values.put("metric_2", (long) ((index * 11L) % 9_973));
+            values.put("metric_3", (long) ((index * 17L) % 8_191));
+            values.put("trade_date_local", (long) tradeDates[index % tradeDates.length]);
+            values.put("settle_date_local", (long) settleDates[index % settleDates.length]);
+            rows.add(new RuntimeRow(index, values));
+        }
+        return new RuntimeTable(
+            List.of(
+                "account_id",
+                "qty",
+                "price",
+                "fee",
+                "metric_0",
+                "metric_1",
+                "metric_2",
+                "metric_3",
+                "trade_date_local",
+                "settle_date_local"
+            ),
+            rows
         );
     }
 

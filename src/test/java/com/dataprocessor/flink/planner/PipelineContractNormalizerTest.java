@@ -134,4 +134,26 @@ class PipelineContractNormalizerTest {
         Assertions.assertEquals(List.of("Quantity"), actions.get("on"));
         Assertions.assertEquals(List.of(), actions.get("rename"));
     }
+
+    @Test
+    void normalizesTagStringFieldsToCanonicalLists() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson("""
+            [
+              {
+                "type": "tag",
+                "params": {
+                  "conditions": "A > 2 & B < 2, B > 2, C > 3",
+                  "tags": "MATCH_AB, MATCH_B, MATCH_C",
+                  "col_name": "RuleTag",
+                  "default_tag": "OTHER"
+                }
+              }
+            ]
+            """);
+
+        Map<?, ?> params = (Map<?, ?>) normalized.get(0).get("params");
+        Assertions.assertEquals(List.of("A > 2 & B < 2", "B > 2", "C > 3"), params.get("conditions"));
+        Assertions.assertEquals(List.of("MATCH_AB", "MATCH_B", "MATCH_C"), params.get("tags"));
+        Assertions.assertEquals("RuleTag", params.get("tag_col_name"));
+    }
 }
