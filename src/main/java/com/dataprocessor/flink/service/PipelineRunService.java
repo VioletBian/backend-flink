@@ -131,7 +131,7 @@ public class PipelineRunService {
         List<Map<String, Object>> preparedPipeline
     ) {
         if (nativeStageExecutor.supports(stagePlan)) {
-            log.info("Stage {} executing with Flink native executor.", stagePlan.getStageIndex());
+            log.info("Stage {} executing with native executor. strategy={}.", stagePlan.getStageIndex(), stagePlan.getStrategy());
             return nativeStageExecutor.execute(runtimeTable, stagePlan);
         }
         log.info(

@@ -3,3 +3,5 @@
 build/
 out/
 target/
+.gradle/8.7/fileHashes/fileHashes.lock
+.gradle/

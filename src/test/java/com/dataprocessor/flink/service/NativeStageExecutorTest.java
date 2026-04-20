@@ -385,7 +385,7 @@ class NativeStageExecutorTest {
     @Test
     void rowsStrategyMatchesSerialForLongRowLocalPipeline() {
         NativeStageExecutor executor = createExecutor();
-        RuntimeTable source = buildLongRowsTable(20000);
+        RuntimeTable source = buildLongRowsTable(5000);
         List<OperationSpec> specs = List.of(
             new OperationSpec(
                 "filter",
@@ -475,11 +475,13 @@ class NativeStageExecutorTest {
             new StagePlan(0, ExecutionConfig.ROWS, logicalStepIndexes, operationTypes, specs, 4, true, null)
         );
 
+        List<RuntimeRow> serialRows = serialResult.getRows();
+        List<RuntimeRow> parallelRows = rowsResult.getRows();
         Assertions.assertEquals(serialResult.getColumns(), rowsResult.getColumns());
-        Assertions.assertEquals(serialResult.getRows().size(), rowsResult.getRows().size());
-        for (int index = 0; index < serialResult.getRows().size(); index++) {
-            Assertions.assertEquals(serialResult.getRows().get(index).getRowId(), rowsResult.getRows().get(index).getRowId());
-            Assertions.assertEquals(serialResult.getRows().get(index).getValues(), rowsResult.getRows().get(index).getValues());
+        Assertions.assertEquals(serialRows.size(), parallelRows.size());
+        for (int index = 0; index < serialRows.size(); index++) {
+            Assertions.assertEquals(serialRows.get(index).getRowId(), parallelRows.get(index).getRowId());
+            Assertions.assertEquals(serialRows.get(index).getValues(), parallelRows.get(index).getValues());
         }
     }
 

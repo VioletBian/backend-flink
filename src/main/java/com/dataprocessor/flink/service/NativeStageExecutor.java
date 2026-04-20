@@ -27,9 +27,6 @@ import com.dataprocessor.flink.planner.StagePlan;
 import com.dataprocessor.flink.runtime.RowExpressionEvaluator;
 import com.dataprocessor.flink.runtime.RuntimeRow;
 import com.dataprocessor.flink.runtime.RuntimeTable;
-import org.apache.flink.api.common.RuntimeExecutionMode;
-import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.springframework.stereotype.Component;
 
 // 中文说明：这里把“已经能静态证明语义安全”的算子尽量收进 Java native；
@@ -73,126 +70,45 @@ public class NativeStageExecutor {
         return executeSerialStage(inputTable, stagePlan.getSpecs());
     }
 
-    // 中文说明：行式 stage 只放 row-local 算子，真正交给 Flink batch DataStream 并行跑。
+    // 中文说明：行式 stage 只放 row-local 算子，按 Python planner 的思路做 JVM 内分块并发。
+    // 这样既保留“长表按行切分”的优化方向，又避免本地 Flink MiniCluster 的启动和序列化开销吃掉收益。
     private RuntimeTable executeRowStage(RuntimeTable inputTable, StagePlan stagePlan) {
         if (stagePlan.getMaxWorkers() <= 1 || inputTable.getRowCount() < 2) {
             return executeSerialStage(inputTable, stagePlan.getSpecs());
         }
 
-        List<String> currentColumns = new ArrayList<>(inputTable.getColumns());
-        StreamExecutionEnvironment env = batchTableEnvironmentFactory.createBatchStreamExecutionEnvironment(stagePlan.getMaxWorkers());
-        env.setRuntimeMode(RuntimeExecutionMode.BATCH);
-        List<RuntimeRow> sourceRows = new ArrayList<>(inputTable.getRows());
-
-        // 中文说明：现在 rows 路径直接在 Flink 流中传 RuntimeRow。
-        // 前面导致 GenericType/Kryo 出错的集合与闭包问题已经收敛掉，这样能去掉每个算子上的 JSON 编解码开销。
-        DataStream<RuntimeRow> stream = env.fromSequence(0L, sourceRows.size() - 1L)
-            .setParallelism(1)
-            .map(index -> sourceRows.get(Math.toIntExact(index)).copy())
-            .setParallelism(1)
-            .rebalance();
-        for (OperationSpec spec : stagePlan.getSpecs()) {
-            try {
-                validateRequiredInputColumns(currentColumns, spec);
-                if ("filter".equals(spec.getType())) {
-                    List<String> availableColumns = new ArrayList<>(currentColumns);
-                    RowExpressionEvaluator.CompiledBooleanExpression compiledExpression =
-                        rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), availableColumns);
-                    List<String> projectedColumns = projectedColumns(currentColumns, spec);
-                    stream = stream.filter(row -> RowExpressionEvaluator.evaluateBooleanExpression(row, compiledExpression))
-                        .setParallelism(stagePlan.getMaxWorkers());
-                    if (!projectedColumns.isEmpty()) {
-                        stream = stream.map(row -> projectRow(row, projectedColumns)).setParallelism(stagePlan.getMaxWorkers());
-                        currentColumns = projectedColumns;
-                    }
-                    continue;
-                }
-                if ("rename".equals(spec.getType())) {
-                    List<String> beforeColumns = new ArrayList<>(currentColumns);
-                    Map<String, String> renameMap = asStringMap(spec.getParams().get("map"));
-                    stream = stream.map(row -> renameRow(row, beforeColumns, renameMap)).setParallelism(stagePlan.getMaxWorkers());
-                    currentColumns = renameColumns(currentColumns, renameMap);
-                    continue;
-                }
-                if ("tag".equals(spec.getType())) {
-                    List<String> availableColumns = new ArrayList<>(currentColumns);
-                    List<RowExpressionEvaluator.CompiledBooleanExpression> compiledConditions = new ArrayList<>(compileConditions(
-                        asStringList(spec.getParams().get("conditions")),
-                        availableColumns
-                    ));
-                    List<String> tags = new ArrayList<>(asStringList(spec.getParams().get("tags")));
-                    String tagColumn = String.valueOf(spec.getParams().get("tag_col_name"));
-                    Object defaultTag = spec.getParams().get("default_tag");
-                    stream = stream.map(
-                        row -> applyTag(row, tagColumn, compiledConditions, tags, defaultTag)
-                    ).setParallelism(stagePlan.getMaxWorkers());
-                    currentColumns = appendColumn(currentColumns, tagColumn);
-                    continue;
-                }
-                if ("constant".equals(spec.getType())) {
-                    LinkedHashMap<String, Object> constantValues = asObjectMap(spec.getParams().get("values"));
-                    stream = stream.map(row -> applyConstant(row, constantValues)).setParallelism(stagePlan.getMaxWorkers());
-                    currentColumns = appendColumns(currentColumns, new ArrayList<>(constantValues.keySet()));
-                    continue;
-                }
-                if ("value_mapping".equals(spec.getType())) {
-                    List<String> mappingColumns = new ArrayList<>(asStringList(spec.getParams().get("columns")));
-                    LinkedHashMap<String, Map<String, Object>> mappings = asNestedObjectMap(spec.getParams().get("mappings"));
-                    Object defaultValue = spec.getParams().get("default");
-                    boolean replaceMode = isReplaceMode(spec.getParams().get("mode"));
-                    stream = stream.map(
-                        row -> applyValueMapping(row, mappingColumns, mappings, defaultValue, replaceMode)
-                    ).setParallelism(stagePlan.getMaxWorkers());
-                    if (!replaceMode) {
-                        currentColumns = appendColumns(currentColumns, asStringList(spec.getParams().get("result_columns")));
-                    }
-                    continue;
-                }
-                if ("col_assign".equals(spec.getType())) {
-                    List<String> availableColumns = new ArrayList<>(currentColumns);
-                    RowExpressionEvaluator.CompiledBooleanExpression compiledCondition =
-                        rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), availableColumns);
-                    RowExpressionEvaluator.CompiledValueExpression compiledValue =
-                        rowExpressionEvaluator.compileValueExpression(String.valueOf(spec.getParams().get("value_expr")), availableColumns);
-                    String columnName = String.valueOf(spec.getParams().get("col_name"));
-                    stream = stream.map(
-                        row -> applyVectorizedColAssign(row, columnName, compiledCondition, compiledValue)
-                    ).setParallelism(stagePlan.getMaxWorkers());
-                    currentColumns = appendColumn(currentColumns, columnName);
-                    continue;
-                }
-                if ("formatter".equals(spec.getType())) {
-                    List<String> formatterColumns = new ArrayList<>(asStringList(spec.getParams().get("columns")));
-                    String method = String.valueOf(spec.getParams().get("method"));
-                    String valueExpr = String.valueOf(spec.getParams().getOrDefault("value_expr", ""));
-                    stream = stream.map(row -> applyFormatter(row, formatterColumns, method, valueExpr))
-                        .setParallelism(stagePlan.getMaxWorkers());
-                    continue;
-                }
-                if ("date_formatter".equals(spec.getType())) {
-                    List<String> dateColumns = new ArrayList<>(asStringList(spec.getParams().get("columns")));
-                    LinkedHashMap<String, Object> formatterParams = new LinkedHashMap<>(spec.getParams());
-                    formatterParams.put("columns", dateColumns);
-                    stream = stream.map(row -> applyDateFormatter(row, dateColumns, formatterParams))
-                        .setParallelism(stagePlan.getMaxWorkers());
-                    continue;
-                }
-                throw new IllegalStateException("Unsupported native row stage operator: " + spec.getType());
-            } catch (RuntimeException exception) {
-                throw PipelineStepExecutionException.wrap(spec, exception);
-            }
+        List<RuntimeRow> sourceRows = inputTable.getRows();
+        List<List<RuntimeRow>> rowChunks = chunkRows(sourceRows, stagePlan.getMaxWorkers());
+        if (rowChunks.size() <= 1) {
+            return executeSerialStage(inputTable, stagePlan.getSpecs());
         }
 
-        List<RuntimeRow> resultRows = new ArrayList<>();
-        try (var iterator = stream.executeAndCollect()) {
-            while (iterator.hasNext()) {
-                resultRows.add(iterator.next());
+        ExecutorService executorService = Executors.newFixedThreadPool(Math.min(stagePlan.getMaxWorkers(), rowChunks.size()));
+        try {
+            List<CompletableFuture<RuntimeTable>> futures = new ArrayList<>();
+            for (List<RuntimeRow> rowChunk : rowChunks) {
+                RuntimeTable chunkTable = new RuntimeTable(inputTable.getColumns(), rowChunk);
+                futures.add(CompletableFuture.supplyAsync(() -> executeSerialStage(chunkTable, stagePlan.getSpecs()), executorService));
             }
+
+            List<RuntimeTable> partialTables = new ArrayList<>();
+            for (CompletableFuture<RuntimeTable> future : futures) {
+                partialTables.add(future.join());
+            }
+
+            List<RuntimeRow> resultRows = new ArrayList<>();
+            List<String> resultColumns = partialTables.isEmpty()
+                ? new ArrayList<>(inputTable.getColumns())
+                : partialTables.get(0).getColumns();
+            for (RuntimeTable partialTable : partialTables) {
+                resultRows.addAll(partialTable.getRows());
+            }
+            return new RuntimeTable(resultColumns, resultRows);
         } catch (Exception exception) {
-            throw new IllegalStateException("Unable to execute Flink native row stage.", exception);
+            throw new IllegalStateException("Unable to execute native row stage.", exception);
+        } finally {
+            executorService.shutdown();
         }
-        resultRows.sort(Comparator.comparingLong(RuntimeRow::getRowId));
-        return new RuntimeTable(currentColumns, resultRows);
     }
 
     // 中文说明：列式并发当前仍聚焦逐列无副作用算子，避免把互相依赖的列拆散后产生语义漂移。
@@ -521,6 +437,20 @@ public class NativeStageExecutor {
             groups.get(index % workerCount).add(columns.get(index));
         }
         return groups.stream().filter(group -> !group.isEmpty()).toList();
+    }
+
+    private List<List<RuntimeRow>> chunkRows(List<RuntimeRow> rows, int maxWorkers) {
+        if (rows.isEmpty()) {
+            return new ArrayList<>();
+        }
+        int workerCount = Math.max(1, Math.min(maxWorkers, rows.size()));
+        int chunkSize = (int) Math.ceil(rows.size() / (double) workerCount);
+        List<List<RuntimeRow>> chunks = new ArrayList<>();
+        for (int start = 0; start < rows.size(); start += chunkSize) {
+            int end = Math.min(rows.size(), start + chunkSize);
+            chunks.add(new ArrayList<>(rows.subList(start, end)));
+        }
+        return chunks;
     }
 
     private List<OperationSpec> subsetSpecsForColumns(List<OperationSpec> specs, List<String> allowedColumns) {
