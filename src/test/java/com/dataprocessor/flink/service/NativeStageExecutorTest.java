@@ -115,6 +115,35 @@ class NativeStageExecutorTest {
     }
 
     @Test
+    void executesValueAssignAndPreservesUnmatchedExistingValues() {
+        NativeStageExecutor executor = createExecutor();
+
+        OperationSpec assignSpec = new OperationSpec(
+            "value_assign",
+            Map.of(
+                "map", new LinkedHashMap<>(Map.of(
+                    "Price", 99,
+                    "Desk", "SH",
+                    "commission_add", 3
+                ))
+            ),
+            "`Client Account` == '7001'",
+            0,
+            new ExecutionConfig(ExecutionConfig.SERIAL, null)
+        );
+
+        RuntimeTable resultTable = executor.execute(buildSampleTable(), buildStagePlan(List.of(assignSpec), List.of("value_assign")));
+
+        Assertions.assertEquals(List.of("Client Account", "Price", "Desk", "commission_add"), resultTable.getColumns());
+        Assertions.assertEquals(99, resultTable.getRows().get(0).getValues().get("Price"));
+        Assertions.assertEquals(9L, resultTable.getRows().get(1).getValues().get("Price"));
+        Assertions.assertEquals("SH", resultTable.getRows().get(0).getValues().get("Desk"));
+        Assertions.assertNull(resultTable.getRows().get(1).getValues().get("Desk"));
+        Assertions.assertEquals(3, resultTable.getRows().get(0).getValues().get("commission_add"));
+        Assertions.assertNull(resultTable.getRows().get(1).getValues().get("commission_add"));
+    }
+
+    @Test
     void vectorizedColAssignUsesPythonTrueDivisionForIntegerInputs() {
         NativeStageExecutor executor = createExecutor();
         RuntimeTable sourceTable = new RuntimeTable(

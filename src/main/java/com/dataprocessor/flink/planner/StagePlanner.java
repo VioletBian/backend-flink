@@ -33,6 +33,7 @@ public class StagePlanner {
         "constant",
         "value_mapping",
         "col_assign",
+        "value_assign",
         "formatter",
         "date_formatter"
     );
@@ -46,6 +47,7 @@ public class StagePlanner {
         "constant",
         "value_mapping",
         "col_assign",
+        "value_assign",
         "formatter",
         "date_formatter"
     );
@@ -175,6 +177,15 @@ public class StagePlanner {
                 assignParams.put("col_name", String.valueOf(params.get("col_name")));
                 assignParams.put("value_expr", params.get("value_expr"));
                 specs.add(new OperationSpec("col_assign", assignParams, normalizeCondition(params.get("condition")), stepIndex, execution));
+                continue;
+            }
+
+            if ("value_assign".equals(operatorType)) {
+                LinkedHashMap<String, Object> valueAssignParams = new LinkedHashMap<>();
+                valueAssignParams.put("map", asObjectMap(params.get("map")));
+                specs.add(
+                    new OperationSpec("value_assign", valueAssignParams, normalizeCondition(params.get("condition")), stepIndex, execution)
+                );
                 continue;
             }
 
@@ -415,6 +426,9 @@ public class StagePlanner {
             if ("col_assign".equals(spec.getType()) && "vectorized".equals(spec.getParams().get("method"))) {
                 return "col-assign-expression-requires-python-fallback";
             }
+            if ("value_assign".equals(spec.getType())) {
+                return "value-assign-condition-requires-python-fallback";
+            }
         }
         return "operator-not-native";
     }
@@ -473,6 +487,9 @@ public class StagePlanner {
                     String.valueOf(spec.getParams().get("value_expr")),
                     availableColumns
                 );
+        }
+        if ("value_assign".equals(spec.getType())) {
+            return rowExpressionEvaluator.supportsBooleanExpression(spec.getCondition(), availableColumns);
         }
         if ("aggregate".equals(spec.getType())) {
             return ExecutionConfig.SERIAL.equals(resolvedStrategy) && supportsNativeAggregate(spec);
@@ -535,6 +552,9 @@ public class StagePlanner {
         }
         if ("col_assign".equals(spec.getType())) {
             return appendColumn(currentColumns, String.valueOf(spec.getParams().get("col_name")));
+        }
+        if ("value_assign".equals(spec.getType())) {
+            return appendColumns(currentColumns, new ArrayList<>(asObjectMap(spec.getParams().get("map")).keySet()));
         }
         return new ArrayList<>(currentColumns);
     }

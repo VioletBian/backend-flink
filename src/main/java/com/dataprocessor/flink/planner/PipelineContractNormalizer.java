@@ -22,6 +22,7 @@ public class PipelineContractNormalizer {
         "constant",
         "value_mapping",
         "col_assign",
+        "value_assign",
         "col_apply",
         "series_transform",
         "formatter",
@@ -121,6 +122,10 @@ public class PipelineContractNormalizer {
             }
         }
 
+        if ("value_assign".equals(stepType)) {
+            params.put("map", normalizeScalarLiteralMap(params.get("map")));
+        }
+
         Map<String, Object> normalized = new LinkedHashMap<>();
         normalized.put("type", stepType);
         normalized.put("params", params);
@@ -146,5 +151,35 @@ public class PipelineContractNormalizer {
                 .toList();
         }
         return List.of();
+    }
+
+    private Map<String, Object> normalizeScalarLiteralMap(Object rawValue) {
+        if (!(rawValue instanceof Map<?, ?> rawMap)) {
+            return Map.of();
+        }
+        // 中文说明：前端 map 编辑器当前会把 value 先序列化成字符串，
+        // 这里统一把 JSON 标量字面量还原成真实类型，避免 Java/Python 对同一 DSL 结果不一致。
+        LinkedHashMap<String, Object> values = new LinkedHashMap<>();
+        rawMap.forEach((key, value) -> values.put(String.valueOf(key), normalizeScalarLiteral(value)));
+        return values;
+    }
+
+    private Object normalizeScalarLiteral(Object rawValue) {
+        if (!(rawValue instanceof String rawString)) {
+            return rawValue;
+        }
+        String trimmed = rawString.trim();
+        if (trimmed.isEmpty()) {
+            return rawValue;
+        }
+        try {
+            Object parsed = objectMapper.readValue(trimmed, Object.class);
+            if (parsed instanceof Map<?, ?> || parsed instanceof List<?>) {
+                return rawValue;
+            }
+            return parsed;
+        } catch (JsonProcessingException exception) {
+            return rawValue;
+        }
     }
 }

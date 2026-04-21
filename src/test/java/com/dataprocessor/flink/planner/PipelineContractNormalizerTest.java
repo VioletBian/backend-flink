@@ -88,6 +88,33 @@ class PipelineContractNormalizerTest {
     }
 
     @Test
+    void normalizesValueAssignScalarLiteralMapValues() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson("""
+            [
+              {
+                "type": "value_assign",
+                "params": {
+                  "condition": "A == 1",
+                  "map": {
+                    "commission_add": "3",
+                    "is_manual": "true",
+                    "comment": "add",
+                    "cleared_at": "null"
+                  }
+                }
+              }
+            ]
+            """);
+
+        Map<?, ?> params = (Map<?, ?>) normalized.get(0).get("params");
+        Map<?, ?> assignmentMap = (Map<?, ?>) params.get("map");
+        Assertions.assertEquals(3, assignmentMap.get("commission_add"));
+        Assertions.assertEquals(true, assignmentMap.get("is_manual"));
+        Assertions.assertEquals("add", assignmentMap.get("comment"));
+        Assertions.assertNull(assignmentMap.get("cleared_at"));
+    }
+
+    @Test
     void normalizesAggregateMethodToLowercaseCanonicalValue() {
         List<Map<String, Object>> normalized = normalizer.normalizeJson("""
             [

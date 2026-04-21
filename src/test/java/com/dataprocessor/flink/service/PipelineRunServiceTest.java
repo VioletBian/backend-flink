@@ -249,6 +249,48 @@ class PipelineRunServiceTest {
     }
 
     @Test
+    void valueAssignPipelineStaysOnNativePath() {
+        PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
+
+        PipelineRunService pipelineRunService = new PipelineRunService(
+            new PipelineContractNormalizer(new ObjectMapper()),
+            new StagePlanner(new OperatorCapabilityRegistry(), new RowExpressionEvaluator()),
+            new NativeStageExecutor(Mockito.mock(BatchTableEnvironmentFactory.class), new RowExpressionEvaluator()),
+            pythonFallbackBridge,
+            new CsvRuntimeTableCodec(),
+            new ObjectMapper()
+        );
+
+        Map<String, Object> response = pipelineRunService.runPipeline(
+            "Client Account,Desk,Price\n7001,LDN,12\n7002,NY,9\n".getBytes(StandardCharsets.UTF_8),
+            """
+                [
+                  {
+                    "type": "value_assign",
+                    "params": {
+                      "condition": "`Client Account` == 7001",
+                      "map": {
+                        "Desk": "SH",
+                        "Price": 99,
+                        "commission_add": "3"
+                      }
+                    }
+                  }
+                ]
+                """,
+            false,
+            false
+        );
+
+        Assertions.assertEquals(List.of("Client Account", "Desk", "Price", "commission_add"), response.get("columns"));
+        Assertions.assertEquals(
+            List.of(Arrays.asList(7001L, "SH", 99, 3), Arrays.asList(7002L, "NY", 9L, null)),
+            response.get("data")
+        );
+        verify(pythonFallbackBridge, never()).run(any(), anyString(), anyBoolean());
+    }
+
+    @Test
     void aggregateWithDisplayCaseMethodStaysOnNativePath() {
         PythonFallbackBridge pythonFallbackBridge = Mockito.mock(PythonFallbackBridge.class);
 

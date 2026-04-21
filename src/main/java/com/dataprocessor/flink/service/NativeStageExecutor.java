@@ -177,6 +177,9 @@ public class NativeStageExecutor {
         if ("col_assign".equals(spec.getType())) {
             return applyVectorizedColAssign(inputTable, spec);
         }
+        if ("value_assign".equals(spec.getType())) {
+            return applyValueAssign(inputTable, spec);
+        }
         if ("formatter".equals(spec.getType())) {
             return applyFormatter(inputTable, spec);
         }
@@ -256,6 +259,27 @@ public class NativeStageExecutor {
             .map(row -> applyVectorizedColAssign(row, columnName, compiledCondition, compiledValue))
             .toList();
         return new RuntimeTable(appendColumn(currentColumns, columnName), resultRows);
+    }
+
+    private RuntimeTable applyValueAssign(RuntimeTable inputTable, OperationSpec spec) {
+        List<String> currentColumns = inputTable.getColumns();
+        LinkedHashMap<String, Object> assignmentMap = asObjectMap(spec.getParams().get("map"));
+        if (assignmentMap.isEmpty()) {
+            return new RuntimeTable(currentColumns, inputTable.getRows());
+        }
+
+        // 中文说明：value_assign 只修改命中行；已有列要保留未命中行原值，
+        // 新列即使没有命中也要补出空值列结构，保证后续 stage 和响应编码可见。
+        List<String> newColumns = assignmentMap.keySet().stream()
+            .filter(column -> !currentColumns.contains(column))
+            .toList();
+        RowExpressionEvaluator.CompiledBooleanExpression compiledCondition =
+            rowExpressionEvaluator.compileBooleanExpression(spec.getCondition(), currentColumns);
+
+        List<RuntimeRow> resultRows = inputTable.getRows().stream()
+            .map(row -> applyValueAssign(row, assignmentMap, newColumns, compiledCondition))
+            .toList();
+        return new RuntimeTable(appendColumns(currentColumns, new ArrayList<>(assignmentMap.keySet())), resultRows);
     }
 
     private RuntimeTable applySort(RuntimeTable inputTable, OperationSpec spec) {
@@ -600,6 +624,23 @@ public class NativeStageExecutor {
             ? RowExpressionEvaluator.evaluateValueExpression(row, compiledValue)
             : null;
         values.put(columnName, assignedValue);
+        return new RuntimeRow(row.getRowId(), values);
+    }
+
+    private static RuntimeRow applyValueAssign(
+        RuntimeRow row,
+        Map<String, Object> assignmentMap,
+        List<String> newColumns,
+        RowExpressionEvaluator.CompiledBooleanExpression compiledCondition
+    ) {
+        LinkedHashMap<String, Object> values = row.getValues();
+        if (RowExpressionEvaluator.evaluateBooleanExpression(row, compiledCondition)) {
+            assignmentMap.forEach(values::put);
+        } else {
+            for (String newColumn : newColumns) {
+                values.putIfAbsent(newColumn, null);
+            }
+        }
         return new RuntimeRow(row.getRowId(), values);
     }
 

@@ -248,6 +248,33 @@ class StagePlannerTest {
     }
 
     @Test
+    void valueAssignIsPlannedAsNativeRowStage() {
+        List<Map<String, Object>> normalized = normalizer.normalizeJson("""
+            [
+              {
+                "type": "value_assign",
+                "params": {
+                  "condition": "`Client Account` != null",
+                  "map": {
+                    "Desk": "SH",
+                    "commission_add": 3
+                  }
+                }
+              }
+            ]
+            """);
+        List<Map<String, Object>> prepared = planner.materializeRunSteps(normalized, ExecutionConfig.AUTO);
+        List<OperationSpec> specs = planner.parsePipelineSpecs(prepared, ExecutionConfig.AUTO);
+        StagePlanner.CandidateSegment candidateSegment = planner.collectCandidateSegment(specs, 0);
+
+        StagePlan stagePlan = planner.chooseStage(buildFilterRuntimeTable(), candidateSegment, 0);
+
+        Assertions.assertTrue(stagePlan.isNativeCapable());
+        Assertions.assertEquals(ExecutionConfig.SERIAL, stagePlan.getStrategy());
+        Assertions.assertEquals("FLINK_NATIVE", stagePlan.getExecutorKind());
+    }
+
+    @Test
     void lambdaColAssignFallsBackToPythonStage() {
         List<Map<String, Object>> normalized = normalizer.normalizeJson("""
             [
