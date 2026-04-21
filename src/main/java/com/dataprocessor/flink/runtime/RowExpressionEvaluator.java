@@ -74,7 +74,13 @@ public class RowExpressionEvaluator {
             throw new IllegalArgumentException("Vectorized value expression cannot be empty.");
         }
         ExpressionBinding binding = compileInternal(expression, availableColumns);
-        return new CompiledValueExpression(binding.spelExpression(), binding.variableMapping());
+        String spelExpression = coerceValueDivisionToFloatingPoint(binding.spelExpression());
+        try {
+            PARSER.parseExpression(spelExpression);
+            return new CompiledValueExpression(spelExpression, binding.variableMapping());
+        } catch (ParseException exception) {
+            throw new IllegalArgumentException("Unsupported expression: " + expression, exception);
+        }
     }
 
     public List<String> extractReferencedColumns(String expression, List<String> availableColumns) {
@@ -262,6 +268,30 @@ public class RowExpressionEvaluator {
             cursor++;
         }
         throw new IllegalArgumentException("Unclosed string literal in expression.");
+    }
+
+    // 中文说明：pandas/Python 的 `/` 是真除法；SpEL 在整数操作数上会取整。
+    // 仅对 col_assign 的 value 表达式注入 double 除数，避免影响 filter/tag 的布尔表达式。
+    private String coerceValueDivisionToFloatingPoint(String expression) {
+        StringBuilder rewritten = new StringBuilder();
+        int cursor = 0;
+        while (cursor < expression.length()) {
+            char current = expression.charAt(cursor);
+            if (current == '\'' || current == '"') {
+                int end = consumeQuotedLiteral(expression, cursor, current);
+                rewritten.append(expression, cursor, end);
+                cursor = end;
+                continue;
+            }
+            if (current == '/') {
+                rewritten.append("/ 1.0 /");
+                cursor++;
+                continue;
+            }
+            rewritten.append(current);
+            cursor++;
+        }
+        return rewritten.toString();
     }
 
     private String resolveVariable(

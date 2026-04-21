@@ -115,6 +115,31 @@ class NativeStageExecutorTest {
     }
 
     @Test
+    void vectorizedColAssignUsesPythonTrueDivisionForIntegerInputs() {
+        NativeStageExecutor executor = createExecutor();
+        RuntimeTable sourceTable = new RuntimeTable(
+            List.of("Quantity", "Price"),
+            List.of(new RuntimeRow(0L, new LinkedHashMap<>(Map.of("Quantity", 3L, "Price", 250_000L))))
+        );
+
+        OperationSpec assignSpec = new OperationSpec(
+            "col_assign",
+            Map.of(
+                "method", "vectorized",
+                "col_name", "Notional",
+                "value_expr", "Quantity * Price / 1000000"
+            ),
+            "index > -1",
+            0,
+            new ExecutionConfig(ExecutionConfig.SERIAL, null)
+        );
+
+        RuntimeTable resultTable = executor.execute(sourceTable, buildStagePlan(List.of(assignSpec), List.of("col_assign")));
+
+        Assertions.assertEquals(0.75, ((Number) resultTable.getRows().get(0).getValues().get("Notional")).doubleValue(), 0.000001);
+    }
+
+    @Test
     void executesConstantOnColumnStageAndAppendsColumnsInSpecOrder() {
         NativeStageExecutor executor = createExecutor();
         OperationSpec constantSpec = new OperationSpec(
